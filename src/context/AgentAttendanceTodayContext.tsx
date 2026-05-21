@@ -9,7 +9,7 @@ import {
 } from "react";
 import type { AgentAttendanceEventRow } from "@/services/attendanceApi";
 import { fetchAttendanceEventsForDay, subscribeToMyAttendanceEvents } from "@/services/attendanceApi";
-import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/hooks/useAuth";
 import { getAustralianDateKey } from "@/utils/australianTime";
 import { parse } from "date-fns";
 
@@ -36,23 +36,12 @@ const AgentAttendanceTodayContext = createContext<AgentAttendanceTodayContextVal
  * Wrap dashboard main column so the header strip and Attendance tab stay in sync.
  */
 export function AgentAttendanceTodayProvider({ now, children }: { now: number; children: ReactNode }) {
+  const { session } = useAuth();
   const todayKey = useMemo(() => getAustralianDateKey(now), [now]);
   const [todayEvents, setTodayEvents] = useState<AgentAttendanceEventRow[]>([]);
   const [todayLoading, setTodayLoading] = useState(true);
   const [todayError, setTodayError] = useState<string | null>(null);
-  const [supabaseUserId, setSupabaseUserId] = useState<string | null | undefined>(undefined);
-
-  useEffect(() => {
-    void supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSupabaseUserId(s?.user?.id ?? null);
-    });
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_evt, s) => {
-      setSupabaseUserId(s?.user?.id ?? null);
-    });
-    return () => subscription.unsubscribe();
-  }, []);
+  const supabaseUserId = session?.userId ?? null;
 
   const refreshToday = useCallback(async () => {
     if (supabaseUserId === undefined) return;

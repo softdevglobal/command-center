@@ -88,10 +88,9 @@ export function OverviewTab({
   const myAnsweredCallsCount = useMemo(() => {
     if (!isAgentOverview || !session) return 0;
     const me = agents.find((a) => a.userId === session.userId);
-    if (!me) return 0;
-    return calls.filter((c) => c.agentId === me.id && c.result === "answered")
-      .length;
-  }, [isAgentOverview, session, agents, calls]);
+    if (!me) return summary?.totalCallsToday ?? 0;
+    return calls.filter((c) => c.agentId === me.id && c.result === "answered").length;
+  }, [isAgentOverview, session, agents, calls, summary?.totalCallsToday]);
 
   const liveAgents = useMemo(
     () => agents.filter((a) => a.status === "on-call"),
@@ -419,6 +418,12 @@ export function OverviewTab({
                 label="Answered Calls"
                 value={myAnsweredCallsCount}
                 accent="var(--cc-color-green)"
+                sub="your calls"
+              />
+              <MetricCard
+                label="Answer Rate"
+                value={`${summary.answerRate}%`}
+                accent="var(--cc-color-cyan)"
                 sub="your calls"
               />
               <MetricCard

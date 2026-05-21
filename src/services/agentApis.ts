@@ -2,8 +2,8 @@
  * agentApis.ts — Agents directory REST API (super-admin only)
  *
  * Backed by the Node API on `VITE_AGENTS_API_URL` (defaults to
- * `http://127.0.0.1:5050/api/agents`). The endpoints require a Supabase
- * super-admin session (Bearer token) — see `agentsBearerToken` below.
+ * `http://127.0.0.1:5050/api/agents`). The endpoints require an authenticated
+ * super-admin session (Bearer token).
  *
  *  GET    /api/agents               → list agents
  *  GET    /api/agents/performance   → aggregated call-handling metrics per agent
@@ -12,7 +12,7 @@
  *  DELETE /api/agents/:id           → remove an agent (cascade onboarding rows)
  */
 
-import { supabase } from '@/integrations/supabase/client';
+import { apiFetch, getAccessToken } from '@/lib/api';
 import type { Agent, AgentStatus, WorkshopUserRole } from './types';
 
 const AGENTS_API_URL =
@@ -276,14 +276,10 @@ function toUpdatePayload(patch: AgentUpdateInput): Record<string, unknown> {
 
 /* ─── HTTP plumbing ────────────────────────────────────────────────────── */
 
-async function agentsBearerToken(): Promise<string> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session?.access_token) {
+function requireAgentsAuth(): void {
+  if (!getAccessToken()) {
     throw new Error('Sign in as super-admin to manage agents.');
   }
-  return session.access_token;
 }
 
 function agentsUrl(
@@ -354,14 +350,13 @@ async function requestAgents(
     body?: unknown;
   } = {},
 ): Promise<unknown> {
-  const token = await agentsBearerToken();
+  requireAgentsAuth();
   const headers = new Headers({
     Accept: 'application/json',
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
   });
 
-  const res = await fetch(agentsUrl(options.pathOrId, options.params), {
+  const res = await apiFetch(agentsUrl(options.pathOrId, options.params), {
     method,
     headers,
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,

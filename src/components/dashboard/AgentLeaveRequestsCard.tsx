@@ -34,7 +34,6 @@ import {
   type LeaveHalfDayPart,
 } from "@/services/leaveRequestsApi";
 import { getAustralianDateKey } from "@/utils/australianTime";
-import { supabase } from "@/integrations/supabase/client";
 import { format, startOfDay } from "date-fns";
 import { CalendarOff, Trash2, X } from "lucide-react";
 
@@ -79,7 +78,7 @@ export function AgentLeaveRequestsCard({ session }: AgentLeaveRequestsCardProps)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [supabaseUserId, setSupabaseUserId] = useState<string | null | undefined>(undefined);
+  const supabaseUserId = session.userId || null;
 
   const todayKey = useMemo(() => getAustralianDateKey(Date.now()), []);
 
@@ -100,20 +99,7 @@ export function AgentLeaveRequestsCard({ session }: AgentLeaveRequestsCardProps)
     };
   }, [attachmentPreviewUrl]);
 
-  useEffect(() => {
-    void supabase.auth.getSession().then(({ data: { session: s } }) => {
-      setSupabaseUserId(s?.user?.id ?? null);
-    });
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_evt, s) => {
-      setSupabaseUserId(s?.user?.id ?? null);
-    });
-    return () => subscription.unsubscribe();
-  }, []);
-
   const reload = useCallback(async () => {
-    if (supabaseUserId === undefined) return;
     if (supabaseUserId === null) {
       setLoading(false);
       return;

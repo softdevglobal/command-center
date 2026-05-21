@@ -1,5 +1,6 @@
 import { getFirebaseOnlyBmsBearerToken } from '@/services/bmsAuth';
 import { supabase } from '@/integrations/supabase/client';
+import { apiFetch, getAccessToken } from '@/lib/api';
 import type { Agent } from '@/services/types';
 
 const BASE_URL =
@@ -163,10 +164,7 @@ async function authorizedFetchAgentChat(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session?.access_token) {
+  if (!getAccessToken()) {
     throw new Error('Sign in to use internal chat.');
   }
 
@@ -174,11 +172,10 @@ async function authorizedFetchAgentChat(
   if (!headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  headers.set('Authorization', `Bearer ${session.access_token}`);
 
   const base = AGENT_CHAT_API_URL.replace(/\/+$/, '');
   const url = `${base}${path.startsWith('/') ? path : `/${path}`}`;
-  return fetch(url, { ...init, headers });
+  return apiFetch(url, { ...init, headers });
 }
 
 async function readHttpErrorDetail(res: Response): Promise<string> {
@@ -842,6 +839,10 @@ function toInternalAgent(raw: unknown, fallbackId = ''): Agent {
     queueIds: Array.isArray(r.queueIds) ? r.queueIds.map(String) : [],
     name,
     extension: pickInternalString(r, ['extension']),
+    email: pickInternalString(r, ['email']) || undefined,
+    phone: pickInternalString(r, ['phone', 'phoneNumber', 'phone_number']) || undefined,
+    bmsOwnerUid: pickInternalString(r, ['bmsOwnerUid', 'bms_owner_uid', 'ownerUid']) || null,
+    bmsBranchId: pickInternalString(r, ['bmsBranchId', 'bms_branch_id', 'branchId']) || null,
     role: 'agent',
     status:
       r.status === 'ringing' ||
@@ -957,6 +958,20 @@ function collectInternalArray(raw: unknown, keys: readonly string[]): unknown[] 
   return [];
 }
 
+function uniqueAgents(agents: Agent[]): Agent[] {
+  const byId = new Map<string, Agent>();
+  for (const agent of agents) {
+    if (!agent.id) continue;
+    const existing = byId.get(agent.id);
+    byId.set(agent.id, {
+      ...agent,
+      ...(existing ?? {}),
+      name: agent.name && agent.name !== 'Unknown' ? agent.name : (existing?.name ?? agent.name),
+    });
+  }
+  return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function extractInternalConversationId(raw: unknown): string {
   const body = asRecord(raw);
   const direct = pickInternalString(body, ['id', 'conversationId', 'conversation_id']);
@@ -991,6 +1006,43 @@ function internalMessagesTable(): InternalChatSupabaseQuery {
 async function readAgentChatJson(res: Response): Promise<unknown> {
   const text = await res.text();
   return text.trim() ? (JSON.parse(text) as unknown) : null;
+}
+
+async function fetchInternalChatAgentsFromApi(): Promise<Agent[] | null> {
+  const res = await authorizedFetchAgentChat('/agents');
+  if (res.status === 404 || res.status === 405) return null;
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `fetchInternalChatAgents failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
+    );
+  }
+  const rows = collectInternalArray(await readAgentChatJson(res), [
+    'agents',
+    'items',
+    'results',
+    'rows',
+  ]);
+  return uniqueAgents(rows.map((row) => toInternalAgent(row)).filter((a) => Boolean(a.id)));
+}
+
+async function fetchInternalChatAgentsFromSupabase(): Promise<Agent[]> {
+  const { data, error } = await supabase
+    .from('agents')
+    .select('*')
+    .order('name');
+  if (error) throw new Error(error.message);
+  return uniqueAgents((data ?? []).map((row) => toInternalAgent(row)));
+}
+
+export async function fetchInternalChatAgents(): Promise<Agent[]> {
+  try {
+    const apiAgents = await fetchInternalChatAgentsFromApi();
+    if (apiAgents && apiAgents.length > 0) return apiAgents;
+  } catch (error) {
+    console.warn('[chatApi] Falling back to Supabase internal chat roster:', error);
+  }
+  return fetchInternalChatAgentsFromSupabase();
 }
 
 export async function fetchInternalConversations(currentAgentId: string): Promise<InternalChatConversation[]> {

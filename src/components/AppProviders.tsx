@@ -1,33 +1,23 @@
-import { ReactNode } from 'react';
+import { type ReactNode } from 'react';
+import { Outlet } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';
 import { DashboardDataProvider } from '@/context/DashboardDataContext';
 import { CallNotificationProvider } from '@/context/CallNotificationContext';
 import { GlobalCallMonitor } from '@/components/dashboard/GlobalCallMonitor';
-import LoginPage from '@/pages/LoginPage';
 
 import { GlobalSoftphone } from './dashboard/GlobalSoftphone';
 
-export function AppProviders({ children }: { children: ReactNode }) {
-  const { user, session, loading, signIn } = useAuth();
+export function AppProviders({ children }: { children?: ReactNode }) {
+  const { session } = useAuth();
 
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50">
-        <div style={{ fontFamily: 'monospace', fontSize: 14, color: '#8a99ad' }}>Loading...</div>
-      </div>
-    );
-  }
-
-  if (!user || !session) {
-    return <LoginPage onSignIn={signIn} />;
-  }
+  if (!session) return null;
 
   return (
     <DashboardDataProvider session={session}>
       <CallNotificationProvider>
         <GlobalCallMonitor />
         <GlobalSoftphone session={session} />
-        {children}
+        {children ?? <Outlet />}
       </CallNotificationProvider>
     </DashboardDataProvider>
   );

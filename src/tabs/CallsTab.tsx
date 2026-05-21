@@ -189,16 +189,23 @@ function useCallerNames(calls: Call[], tenants: Tenant[]) {
 
 function CallStatusBadge({ result }: { result: CallResult }) {
   const r = RESULT_MAP[result] ?? RESULT_MAP.missed;
-  const label = result === 'abandoned' ? 'Hung up' : r.label;
   return (
     <Badge
       variant="outline"
       className="rounded-full border-0 px-2.5 py-1 text-[11px] font-semibold"
       style={{ color: r.color, background: r.bg }}
     >
-      {label}
+      {callResultLabel(result)}
     </Badge>
   );
+}
+
+function callResultLabel(result: CallResult): string {
+  return result === 'abandoned' ? 'Hung up' : RESULT_MAP[result]?.label ?? 'Missed';
+}
+
+function isAgentVisibleCallResult(result: CallResult): boolean {
+  return result === 'answered' || result === 'abandoned' || result === 'missed';
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -235,9 +242,19 @@ export function CallsTab({
   const roleScopedCalls = useMemo(() => {
     if (!isAgentView) return allCalls;
     const me = agents.find((a) => a.userId === session.userId);
-    if (!me) return [];
-    return allCalls.filter((c) => c.agentId === me.id && c.result === 'answered');
+    const agentCalls = me ? allCalls.filter((c) => c.agentId === me.id) : allCalls;
+    return agentCalls.filter((c) => isAgentVisibleCallResult(c.result));
   }, [allCalls, agents, isAgentView, session.userId]);
+
+  const agentAnsweredCount = useMemo(
+    () => roleScopedCalls.filter((c) => c.result === 'answered').length,
+    [roleScopedCalls],
+  );
+
+  const agentHungUpCount = useMemo(
+    () => roleScopedCalls.filter((c) => c.result === 'abandoned' || c.result === 'missed').length,
+    [roleScopedCalls],
+  );
 
   const { nameMap, loading: namesLoading, didTenantLabelMap } = useCallerNames(roleScopedCalls, tenants);
 
@@ -395,7 +412,7 @@ export function CallsTab({
           </TableCell>
         )}
         <TableCell className="max-w-[200px]">
-          {(c.result === 'answered' || (c.result as string) === 'rejected') ? (
+          {c.agentId || c.agentName.trim() ? (
             <span className="font-medium text-foreground">{c.agentName}</span>
           ) : (
             <span className="text-muted-foreground">—</span>
@@ -549,7 +566,7 @@ export function CallsTab({
                     onClick={() => setFilterResult(key)}
                     style={filterResult === key ? { borderColor: val.color, color: val.color, background: val.bg } : {}}
                   >
-                    {val.label}
+                    {callResultLabel(key as CallResult)}
                   </Button>
                 ))}
               </div>
@@ -591,9 +608,14 @@ export function CallsTab({
           <CardTitle className="flex items-center gap-3 text-base">
             Call History
             {isAgentView && (
-              <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-normal text-slate-600">
-                Your answered calls
-              </span>
+              <>
+                <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-normal text-emerald-700">
+                  Answered {agentAnsweredCount}
+                </span>
+                <span className="rounded-full bg-rose-50 px-2.5 py-0.5 text-[11px] font-normal text-rose-700">
+                  Hung up {agentHungUpCount}
+                </span>
+              </>
             )}
             {namesLoading && (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-normal text-slate-500">

@@ -23,6 +23,7 @@ import {
   subscribeToInternalMessages,
   subscribeToAllInternalConversations,
   fetchAllInternalConversations,
+  fetchInternalChatAgents,
   isCommandCentreAgent,
   resolveSuperAdminMessagingAgentId,
   InternalChatConversation,
@@ -92,6 +93,49 @@ function resolveConversationDisplay(
   };
 }
 
+function hydrateConversationParticipants(
+  conv: InternalChatConversation,
+  agentsById: Map<string, Agent>,
+  myAgentId: string | null,
+): InternalChatConversation {
+  const rosterAgentA = agentsById.get(conv.participant_a);
+  const rosterAgentB = agentsById.get(conv.participant_b);
+  const agentA =
+    !conv.agentA || conv.agentA.name === 'Unknown'
+      ? rosterAgentA ?? conv.agentA
+      : conv.agentA;
+  const agentB =
+    !conv.agentB || conv.agentB.name === 'Unknown'
+      ? rosterAgentB ?? conv.agentB
+      : conv.agentB;
+  const rosterOther = conv.otherParticipant?.id
+    ? agentsById.get(conv.otherParticipant.id)
+    : undefined;
+  const otherParticipant =
+    (!conv.otherParticipant || conv.otherParticipant.name === 'Unknown'
+      ? rosterOther
+      : undefined) ??
+    (myAgentId && conv.participant_a === myAgentId ? agentB : undefined) ??
+    (myAgentId && conv.participant_b === myAgentId ? agentA : undefined) ??
+    conv.otherParticipant;
+
+  return {
+    ...conv,
+    agentA,
+    agentB,
+    otherParticipant,
+  };
+}
+
+function findCurrentAgent(agents: Agent[], session: UserSession): Agent | undefined {
+  const byUserId = agents.find((a) => a.userId === session.userId);
+  if (byUserId) return byUserId;
+
+  const email = session.authEmail?.trim().toLowerCase();
+  if (!email) return undefined;
+  return agents.find((a) => (a.email ?? '').trim().toLowerCase() === email);
+}
+
 export function InternalChatTab({ session, permissions }: InternalChatTabProps) {
   const { agents, tenants } = useDashboard();
   const queryClient = useQueryClient();
@@ -110,10 +154,55 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
   const [linkingAgentId, setLinkingAgentId] = useState<string | null>(null);
   const [linkError, setLinkError] = useState<string | null>(null);
   const [creatingSuperAgent, setCreatingSuperAgent] = useState(false);
+  const [internalRoster, setInternalRoster] = useState<Agent[]>([]);
+  const [rosterLoading, setRosterLoading] = useState(true);
+  const [rosterError, setRosterError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const hasDashboardRoster = agents.length > 0;
+    setRosterLoading(!hasDashboardRoster);
+    setRosterError(null);
+
+    fetchInternalChatAgents()
+      .then((rows) => {
+        if (!cancelled) setInternalRoster(rows);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          if (!hasDashboardRoster) {
+            setRosterError(
+              error instanceof Error ? error.message : 'Could not load agent roster.',
+            );
+          }
+          setInternalRoster([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRosterLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agents.length]);
+
+  const chatAgents = useMemo(() => {
+    const byId = new Map<string, Agent>();
+    for (const agent of [...internalRoster, ...agents]) {
+      byId.set(agent.id, agent);
+    }
+    return [...byId.values()];
+  }, [agents, internalRoster]);
+
+  const agentsById = useMemo(
+    () => new Map(chatAgents.map((agent) => [agent.id, agent] as const)),
+    [chatAgents],
+  );
 
   const currentAgent = useMemo(() => 
-    agents.find(a => a.userId === session.userId), 
-    [agents, session.userId]
+    findCurrentAgent(chatAgents, session),
+    [chatAgents, session]
   );
 
   const isSuperAdmin = session.role === 'super-admin';
@@ -121,16 +210,16 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
   const superAdminSenderId = useMemo(
     () =>
       isSuperAdmin
-        ? resolveSuperAdminMessagingAgentId(agents, session.userId)
+        ? resolveSuperAdminMessagingAgentId(chatAgents, session.userId)
         : null,
-    [isSuperAdmin, agents, session.userId],
+    [isSuperAdmin, chatAgents, session.userId],
   );
 
   const messagingAgentId = currentAgent?.id ?? superAdminSenderId ?? null;
 
   const commandCentreAgents = useMemo(
-    () => agents.filter(isCommandCentreAgent),
-    [agents],
+    () => chatAgents.filter(isCommandCentreAgent),
+    [chatAgents],
   );
 
   const messageableAgents = useMemo(
@@ -205,18 +294,27 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
 
   // Load conversations
   const loadConversations = useCallback(async () => {
-    if (!messagingAgentId && !isSuperAdmin) return;
+    if (rosterLoading && !isSuperAdmin) return;
+    if (!messagingAgentId && !isSuperAdmin) {
+      setConversations([]);
+      setLoading(false);
+      return;
+    }
     try {
       const data = isSuperAdmin 
         ? await fetchAllInternalConversations() 
         : await fetchInternalConversations(messagingAgentId!);
-      setConversations(data);
+      setConversations(
+        data.map((conv) =>
+          hydrateConversationParticipants(conv, agentsById, messagingAgentId),
+        ),
+      );
     } catch (error) {
       console.error('Failed to load conversations', error);
     } finally {
       setLoading(false);
     }
-  }, [messagingAgentId, isSuperAdmin]);
+  }, [agentsById, messagingAgentId, isSuperAdmin, rosterLoading]);
 
   useEffect(() => {
     loadConversations();
@@ -334,7 +432,9 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
   const handleStartChat = useCallback(async (targetAgentId: string) => {
     if (!messagingAgentId) {
       setComposeError(
-        'Link a command centre agent profile to your super admin account (Agents tab) to send messages.',
+        isSuperAdmin
+          ? 'Link a command centre agent profile to your super admin account (Agents tab) to send messages.'
+          : 'Your login is not linked to an agent profile. Ask an admin to link your account.',
       );
       return;
     }
@@ -351,7 +451,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
       console.error('Failed to start chat', error);
       setComposeError('Could not start conversation. Try again.');
     }
-  }, [messagingAgentId, loadConversations]);
+  }, [isSuperAdmin, messagingAgentId, loadConversations]);
 
   // Handle auto-starting a chat from the dashboard
   const { pendingInternalChatAgentId, setPendingInternalChatAgentId } = useDashboard();
@@ -359,7 +459,9 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
     if (!pendingInternalChatAgentId) return;
     if (!messagingAgentId) {
       setComposeError(
-        'Link a command centre agent profile to your account before messaging agents.',
+        isSuperAdmin
+          ? 'Link a command centre agent profile to your account before messaging agents.'
+          : 'Your login is not linked to an agent profile. Ask an admin to link your account.',
       );
       return;
     }
@@ -367,6 +469,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
     setPendingInternalChatAgentId(null);
   }, [
     pendingInternalChatAgentId,
+    isSuperAdmin,
     messagingAgentId,
     handleStartChat,
     setPendingInternalChatAgentId,
@@ -497,6 +600,18 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
             </div>
           )}
 
+          {!isSuperAdmin && !rosterLoading && !currentAgent && (
+            <div className="text-xs text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mb-3">
+              Your login is not linked to a command centre agent profile yet.
+            </div>
+          )}
+
+          {rosterError && (
+            <div className="text-xs text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mb-3">
+              {rosterError}
+            </div>
+          )}
+
           {(isSuperAdmin ? messagingAgentId : currentAgent) && (
             <div className="space-y-1.5">
               <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
@@ -507,8 +622,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
                   <SelectValue placeholder={isSuperAdmin ? 'Select agent...' : 'Select an agent...'} />
                 </SelectTrigger>
                 <SelectContent className="rounded-2xl border-slate-200 shadow-xl">
-                  {(isSuperAdmin ? messageableAgents : agents.filter(a => a.id !== currentAgent?.id && isCommandCentreAgent(a)))
-                    .map(agent => (
+                  {messageableAgents.map(agent => (
                       <SelectItem key={agent.id} value={agent.id} className="rounded-xl focus:bg-emerald-50 focus:text-emerald-900 py-2.5">
                         <div className="flex items-center gap-2">
                           <div className={cn(
@@ -519,8 +633,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
                           <span className="text-[10px] text-slate-400 font-mono ml-auto">ext {agent.extension}</span>
                         </div>
                       </SelectItem>
-                    ))
-                  }
+                    ))}
                 </SelectContent>
               </Select>
             </div>
@@ -670,7 +783,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
                 {messages.map((msg, idx) => {
                   const isMine = msg.sender_id === messagingAgentId;
                   const showAvatar = idx === 0 || messages[idx-1].sender_id !== msg.sender_id;
-                  const sender = agents.find(a => a.id === msg.sender_id);
+                  const sender = agentsById.get(msg.sender_id);
 
                   return (
                     <div 
@@ -725,7 +838,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
               </div>
             </ScrollArea>
 
-            {(!isSuperAdmin || (isSuperAdmin && currentAgent)) && (
+            {messagingAgentId && canSendInSelectedConv && (
               <div className="p-4 bg-white border-t border-slate-100">
                 <form onSubmit={handleSendMessage} className="flex items-center gap-2">
                   <div className="flex-1 relative">

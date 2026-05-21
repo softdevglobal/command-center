@@ -1,4 +1,5 @@
 import { supabase } from '@/integrations/supabase/client';
+import { apiFetch, getAccessToken } from '@/lib/api';
 import type { UserSession } from './types';
 
 const SYSTEM_AUDIT_LOGS_API_URL =
@@ -177,24 +178,10 @@ export function normalizeAuditLogEntry(raw: unknown): AuditLogEntry {
   };
 }
 
-async function getSuperAdminAuditBearerToken(): Promise<string> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-
-  if (session?.access_token) {
-    return session.access_token;
+function requireSuperAdminAuditAuth(): void {
+  if (!getAccessToken()) {
+    throw new Error('Sign in as super-admin to load audit logs.');
   }
-
-  throw new Error('Sign in as super-admin to load audit logs.');
-}
-
-async function getAuditBearerToken(): Promise<string | null> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-
-  return session?.access_token ?? null;
 }
 
 function auditLogsUrl(limit: number): string {
@@ -279,16 +266,12 @@ export async function postSystemAuditLog(input: SystemAuditLogPostInput): Promis
   }
   if (!resourceType) throw new Error('Audit resourceType is required.');
 
-  const token = await getAuditBearerToken();
   const headers = new Headers({
     Accept: 'application/json',
     'Content-Type': 'application/json',
   });
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
-  }
 
-  const res = await fetch(systemAuditLogsUrl(), {
+  const res = await apiFetch(systemAuditLogsUrl(), {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -452,11 +435,10 @@ export async function fetchAnsweredCustomerAgentMap(): Promise<Map<string, strin
  * Fetches recent audit logs for the dashboard.
  */
 export async function fetchSystemAuditLogs(limit: number = 100): Promise<AuditLogEntry[]> {
-  const token = await getSuperAdminAuditBearerToken();
-  const res = await fetch(auditLogsUrl(limit), {
+  requireSuperAdminAuditAuth();
+  const res = await apiFetch(auditLogsUrl(limit), {
     headers: {
       Accept: 'application/json',
-      Authorization: `Bearer ${token}`,
     },
   });
 

@@ -85,9 +85,10 @@ const LINKUS_DISMISS_DEDUP_MS = 3500;
 /**
  * Tab→query gating lives in `@/lib/dashboardQueryLimits` (shared with hover prefetch).
  *
- * - `fetchTenants` + `fetchAgentsList` stay on for the whole session — `DashboardPage`
- *   resolves chat tenant, workshop owner UID, leave badges, and sidebar `isCCAgent`
- *   from these lists even when the heavy tabs are closed.
+ * - `fetchTenants` stays on for the whole session. The super-admin agents API is
+ *   only queried for non-agent roles because the backend rejects agent tokens.
+ *   Other dashboard code still resolves chat tenant, workshop owner UID, and
+ *   leave badges from the cached lists when available.
  * - Queues / calls / SIP / onboarding / derived summary only run when a tab that
  *   actually renders that data is selected (stops polling while you are elsewhere).
  */
@@ -142,8 +143,11 @@ export function useDashboardData({
   });
 
   const { data: agents = [], error: agentsErr, isPending: isPendingAgents } = useQuery({
-    queryKey: ["agents", effectiveTenant],
-    queryFn: () => fetchAgentsList({ tenantId: effectiveTenant }),
+    queryKey: ["agents", session?.role, effectiveTenant],
+    queryFn: () =>
+      session?.role === "agent"
+        ? Promise.resolve([])
+        : fetchAgentsList({ tenantId: effectiveTenant }),
     enabled: !!session,
     staleTime: 10_000,
     refetchInterval: refreshInterval,
@@ -177,7 +181,7 @@ export function useDashboardData({
   // The overview API supplies the call KPIs; live local data fills any fields
   // the API does not return (active calls, waiting calls, available agents).
   const { data: summary = null, error: summaryErr } = useQuery({
-    queryKey: ["summary", effectiveTenant, callDate, callsFetchLimit],
+    queryKey: ["summary", session?.role, effectiveTenant, callDate, callsFetchLimit],
     queryFn: () => {
       const { startIso, endIso } = attendanceDayRangeAustralianYmd(callDate);
       return fetchSummary(
@@ -185,6 +189,10 @@ export function useDashboardData({
         { agents, queues, calls },
         startIso,
         endIso,
+        {
+          useDashboardApi: !isAgent,
+          agentMetrics: isAgent,
+        },
       );
     },
     enabled:

@@ -1,4 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
+import { apiFetch } from "@/lib/api";
 import type {
   Tenant,
   Queue,
@@ -83,8 +84,17 @@ export async function fetchSummary(
   providedData?: { agents?: Agent[]; queues?: Queue[]; calls?: Call[] },
   startDate?: string,
   endDate?: string,
+  options?: { useDashboardApi?: boolean; agentMetrics?: boolean },
 ): Promise<DashboardSummary> {
-  const localSummary = await computeDashboardSummary(tenantId, providedData);
+  const localSummary = await computeDashboardSummary(
+    tenantId,
+    providedData,
+    options?.agentMetrics,
+  );
+
+  if (options?.useDashboardApi === false) {
+    return localSummary;
+  }
 
   try {
     const apiSummary = await fetchDashboardMetrics(tenantId, startDate, endDate);
@@ -97,6 +107,7 @@ export async function fetchSummary(
 async function computeDashboardSummary(
   tenantId?: string | null,
   providedData?: { agents?: Agent[]; queues?: Queue[]; calls?: Call[] },
+  agentMetrics = false,
 ): Promise<DashboardSummary> {
   // Use provided data if available to avoid redundant network requests.
   const agents = providedData?.agents ?? await fetchAgents(tenantId);
@@ -127,7 +138,7 @@ async function computeDashboardSummary(
     queuedCalls: queued,
     availableAgents: available,
     onlineAgents: online,
-    totalCallsToday: total,
+    totalCallsToday: agentMetrics ? answered : total,
     answerRate: total > 0 ? Math.round((answered / total) * 1000) / 10 : 0,
     abandonRate:
       total > 0
@@ -174,18 +185,6 @@ function dashboardApiUrl(
   return url.toString();
 }
 
-async function getDashboardApiBearerToken(): Promise<string> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-
-  if (session?.access_token) {
-    return session.access_token;
-  }
-
-  throw new Error("Sign in to load dashboard metrics.");
-}
-
 async function readDashboardApiErrorDetail(res: Response): Promise<string> {
   const text = await res.text();
   if (!text.trim()) return "";
@@ -210,11 +209,9 @@ async function fetchDashboardJson(
   startDate?: string,
   endDate?: string,
 ): Promise<unknown> {
-  const token = await getDashboardApiBearerToken();
-  const res = await fetch(dashboardApiUrl(path, tenantId, startDate, endDate), {
+  const res = await apiFetch(dashboardApiUrl(path, tenantId, startDate, endDate), {
     headers: {
       Accept: "application/json",
-      Authorization: `Bearer ${token}`,
     },
   });
 
@@ -981,18 +978,6 @@ function normalizeCallsApiRow(raw: unknown): CallsApiRow {
   };
 }
 
-async function getCallsApiBearerToken(): Promise<string> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-
-  if (session?.access_token) {
-    return session.access_token;
-  }
-
-  throw new Error("Sign in to load calls.");
-}
-
 function callsApiUrl(
   tenantId?: string | null,
   limit: number = 200,
@@ -1026,11 +1011,9 @@ async function fetchCallsApiRows(
   startDate?: string,
   endDate?: string,
 ): Promise<CallsApiRow[]> {
-  const token = await getCallsApiBearerToken();
-  const res = await fetch(callsApiUrl(tenantId, limit, startDate, endDate), {
+  const res = await apiFetch(callsApiUrl(tenantId, limit, startDate, endDate), {
     headers: {
       Accept: "application/json",
-      Authorization: `Bearer ${token}`,
     },
   });
 

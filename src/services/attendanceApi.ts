@@ -3,6 +3,7 @@ import {
   getAustralianDateKey,
 } from "@/utils/australianTime";
 import { supabase } from "@/integrations/supabase/client";
+import { apiFetch, getAccessToken } from "@/lib/api";
 import {
   AUDIT_ACTION_ATTENDANCE_CLOCK_IN,
   AUDIT_ACTION_ATTENDANCE_CLOCK_OUT,
@@ -91,14 +92,10 @@ function pickNullableString(
   return text || null;
 }
 
-async function attendanceBearerToken(): Promise<string> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session?.access_token) {
+function requireAttendanceAuth(): void {
+  if (!getAccessToken()) {
     throw new Error("Sign in with your dashboard account to use attendance.");
   }
-  return session.access_token;
 }
 
 function attendanceUrl(path: string, params?: Record<string, string | null | undefined>): string {
@@ -116,13 +113,12 @@ async function attendanceFetch(
   init: RequestInit = {},
   params?: Record<string, string | null | undefined>,
 ): Promise<Response> {
-  const token = await attendanceBearerToken();
+  requireAttendanceAuth();
   const headers = new Headers(init.headers);
   if (!headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  headers.set("Authorization", `Bearer ${token}`);
-  return fetch(attendanceUrl(path, params), { ...init, headers });
+  return apiFetch(attendanceUrl(path, params), { ...init, headers });
 }
 
 function shiftSchedulesUrl(path = ""): string {
@@ -132,14 +128,13 @@ function shiftSchedulesUrl(path = ""): string {
 }
 
 async function shiftSchedulesFetch(path = "", init: RequestInit = {}): Promise<Response> {
-  const token = await attendanceBearerToken();
+  requireAttendanceAuth();
   const headers = new Headers(init.headers);
   headers.set("Accept", "application/json");
   if (!headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  headers.set("Authorization", `Bearer ${token}`);
-  return fetch(shiftSchedulesUrl(path), { ...init, headers });
+  return apiFetch(shiftSchedulesUrl(path), { ...init, headers });
 }
 
 function parseTimeMs(raw: unknown): number | null {

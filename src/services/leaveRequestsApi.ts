@@ -1,4 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
+import { apiFetch, getAccessToken } from "@/lib/api";
 import {
   AUDIT_ACTION_LEAVE_REQUEST_CREATE,
   AUDIT_ACTION_LEAVE_REQUEST_UPDATE,
@@ -153,14 +154,10 @@ function extractLeaveRequest(raw: unknown): AgentLeaveRequestRow {
   return row;
 }
 
-async function leaveRequestsBearerToken(): Promise<string> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (!session?.access_token) {
+function requireLeaveRequestsAuth(): void {
+  if (!getAccessToken()) {
     throw new Error("Sign in with your dashboard account to use leave requests.");
   }
-  return session.access_token;
 }
 
 function leaveRequestsUrl(path: string): string {
@@ -170,13 +167,12 @@ function leaveRequestsUrl(path: string): string {
 }
 
 async function leaveRequestsFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const token = await leaveRequestsBearerToken();
+  requireLeaveRequestsAuth();
   const headers = new Headers(init.headers);
   if (!headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  headers.set("Authorization", `Bearer ${token}`);
-  return fetch(leaveRequestsUrl(path), { ...init, headers });
+  return apiFetch(leaveRequestsUrl(path), { ...init, headers });
 }
 
 async function readHttpErrorDetail(res: Response): Promise<string> {

@@ -7,7 +7,7 @@
  *    already reads during incoming-call screen pop.
  */
 
-import { supabase } from '@/integrations/supabase/client';
+import { apiFetch, getAccessToken } from '@/lib/api';
 import { getBmsBearerToken } from '@/services/bmsAuth';
 import {
   AUDIT_ACTION_DID_MAPPING_CREATE,
@@ -273,16 +273,10 @@ function toApiPayload(input: DIDMappingInput) {
   };
 }
 
-async function getDidMappingsBearerToken(): Promise<string> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-
-  if (session?.access_token) {
-    return session.access_token;
+function requireDidMappingsAuth(): void {
+  if (!getAccessToken()) {
+    throw new Error('Sign in as super-admin to manage DID mappings.');
   }
-
-  throw new Error('Sign in as super-admin to manage DID mappings.');
 }
 
 function didMappingsUrl(did?: string): string {
@@ -293,11 +287,10 @@ function didMappingsUrl(did?: string): string {
 }
 
 async function apiHeaders(): Promise<HeadersInit> {
-  const token = await getDidMappingsBearerToken();
+  requireDidMappingsAuth();
   return {
     Accept: 'application/json',
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
   };
 }
 
@@ -347,7 +340,7 @@ async function requestDidMappings(
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   options: { did?: string; body?: unknown } = {},
 ): Promise<unknown> {
-  const res = await fetch(didMappingsUrl(options.did), {
+  const res = await apiFetch(didMappingsUrl(options.did), {
     method,
     headers: await apiHeaders(),
     body: options.body ? JSON.stringify(options.body) : undefined,

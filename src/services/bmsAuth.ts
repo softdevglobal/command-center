@@ -1,13 +1,13 @@
 import { auth, waitForAuth } from '@/lib/firebase';
+import { getAccessToken } from '@/lib/api';
 import { getIdToken } from 'firebase/auth';
-import { supabase } from '@/integrations/supabase/client';
 
 const SIGN_IN_REQUIRED =
   'Sign in required to use the workshop API. Please sign in with your dashboard account.';
 
 /**
  * Bearer token for BMS Pro `/api/call-center` requests.
- * Uses the signed-in Firebase user ID token, or the Supabase session JWT — never a static env secret.
+ * Uses the signed-in Firebase user ID token, or the dashboard backend JWT — never a static env secret.
  */
 export async function getBmsBearerToken(options?: {
   /** Wait for Firebase auth to finish initializing (matches previous bookings/notifications behaviour). */
@@ -24,12 +24,8 @@ export async function getBmsBearerToken(options?: {
     return getIdToken(user, options?.forceRefreshFirebase ?? false);
   }
 
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-  if (session?.access_token) {
-    return session.access_token;
-  }
+  const token = getAccessToken();
+  if (token) return token;
 
   throw new Error(SIGN_IN_REQUIRED);
 }

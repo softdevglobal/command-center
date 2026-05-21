@@ -228,8 +228,11 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
 
   /** BMS chat list needs a tenant scope; super-admins often have no row in the switcher — fall back like softphone context. */
   const effectiveChatTenantId = useMemo(
-    () => d.selectedTenant ?? session.tenantId ?? d.tenants[0]?.id ?? null,
-    [d.selectedTenant, session.tenantId, d.tenants],
+    () =>
+      session.role === 'agent'
+        ? (session.tenantId ?? d.selectedTenant ?? null)
+        : (d.selectedTenant ?? session.tenantId ?? d.tenants[0]?.id ?? null),
+    [d.selectedTenant, session.role, session.tenantId, d.tenants],
   );
 
   const chatWorkshopOwnerUid = useMemo(() => {
@@ -303,6 +306,8 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
           count = await fetchGlobalInternalUnreadCount();
         } else if (currentAgentDbId) {
           count = await fetchInternalUnreadCount(currentAgentDbId);
+        } else if (session.role === 'agent') {
+          count = await fetchInternalUnreadCount(session.userId);
         }
         
         if (!cancelled) setInternalChatUnreadCount(count);
@@ -321,7 +326,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
       clearInterval(id);
       window.removeEventListener('internal-chat-read', handleReadEvent);
     };
-  }, [permissions.canViewInternalChat, currentAgentDbId, session.role, d.selectedTab]);
+  }, [permissions.canViewInternalChat, currentAgentDbId, session.role, session.userId, d.selectedTab]);
 
   useEffect(() => {
     if (session.role !== 'super-admin') return;

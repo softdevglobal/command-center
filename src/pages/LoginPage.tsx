@@ -1,12 +1,22 @@
 import '@/styles/dashboard.css';
 import { useState, useEffect, type FormEvent } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { useAuth } from '@/hooks/useAuth';
 
-interface LoginPageProps {
-  onSignIn: (email: string, password: string) => Promise<{ error: string | null }>;
+function dashboardPathForRoles(roles: string[]): string {
+  const normalized = roles.map((role) => role.trim().toLowerCase().replace(/_/g, '-'));
+  if (normalized.some((role) => role === 'super-admin' || role === 'admin')) {
+    return '/admin';
+  }
+  if (normalized.includes('agent')) return '/agent';
+  return '/';
 }
 
-export default function LoginPage({ onSignIn }: LoginPageProps) {
+export default function LoginPage() {
+  const { login, isAuthenticated, isLoading, roles } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -17,6 +27,11 @@ export default function LoginPage({ onSignIn }: LoginPageProps) {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => { setMounted(true); }, []);
+
+  useEffect(() => {
+    if (isLoading || !isAuthenticated) return;
+    navigate(dashboardPathForRoles(roles), { replace: true });
+  }, [isAuthenticated, isLoading, navigate, roles]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -51,9 +66,17 @@ export default function LoginPage({ onSignIn }: LoginPageProps) {
     // else router.replace('/dashboard');
     // ─────────────────────────────────────────────────────────────────────
 
-    const result = await onSignIn(email, password);
-    if (result.error) setError(result.error);
-    setLoading(false);
+    try {
+      const response = await login(email.trim(), password);
+      const from = location.state && typeof location.state === 'object'
+        ? (location.state as { from?: { pathname?: string } }).from?.pathname
+        : undefined;
+      navigate(from || dashboardPathForRoles(response.roles ?? []), { replace: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Sign in failed');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (

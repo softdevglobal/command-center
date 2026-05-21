@@ -9,6 +9,7 @@
  */
 
 import { supabase } from "@/integrations/supabase/client";
+import { getAccessToken } from "@/lib/api";
 import {
   IpForbiddenError,
   isYeastarEdgeIpBlocked,
@@ -720,8 +721,7 @@ async function relayPbxDownloadThroughEdge(
 ): Promise<{ buf: ArrayBuffer; mime: string }> {
   const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string).replace(/\/$/, '');
   const anonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
-  const { data: sess } = await supabase.auth.getSession();
-  const bearer = sess.session?.access_token ?? anonKey;
+  const bearer = getAccessToken() ?? anonKey;
 
   const res = await fetch(`${supabaseUrl}/functions/v1/yeastar-api`, {
     method: 'POST',
@@ -780,8 +780,7 @@ async function streamRecordingThroughEdge(
 ): Promise<{ buf: ArrayBuffer; mime: string }> {
   const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string).replace(/\/$/, '');
   const anonKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
-  const { data: sess } = await supabase.auth.getSession();
-  const bearer = sess.session?.access_token ?? anonKey;
+  const bearer = getAccessToken() ?? anonKey;
 
   const streamPayload: Record<string, string> = { recording_path: recordingPath };
   if (extraToken) streamPayload.access_token = extraToken;
