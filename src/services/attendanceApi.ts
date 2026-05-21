@@ -3,8 +3,22 @@ import {
   getAustralianDateKey,
 } from "@/utils/australianTime";
 import { supabase } from "@/integrations/supabase/client";
+import {
+  AUDIT_ACTION_ATTENDANCE_CLOCK_IN,
+  AUDIT_ACTION_ATTENDANCE_CLOCK_OUT,
+  AUDIT_ACTION_SHIFT_SCHEDULE_UPDATE,
+  postSystemAuditLog,
+} from "./auditLogApi";
 import type { AgentShiftSchedule } from "./types";
 import { startOfDay, endOfDay } from "date-fns";
+
+const AGENT_ATTENDANCE_API_URL =
+  (import.meta.env.VITE_AGENT_ATTENDANCE_API_URL as string | undefined)?.trim() ||
+  "http://127.0.0.1:5050/api/agent-attendance";
+
+const AGENT_SHIFT_SCHEDULES_API_URL =
+  (import.meta.env.VITE_AGENT_SHIFT_SCHEDULES_API_URL as string | undefined)?.trim() ||
+  "http://127.0.0.1:5050/api/agent-shift-schedules";
 
 export const ATTENDANCE_EVENT_TYPES = [
   "clock_in",
@@ -27,12 +41,418 @@ export type AgentAttendanceEventRow = {
 
 export type AttendanceShiftStatus = "off_clock" | "working" | "on_break";
 
+export type AgentAttendanceStatusResponse = {
+  status: AttendanceShiftStatus;
+  shiftStartedAt: number | null;
+  breakStartedAt: number | null;
+  lastEventType?: string | null;
+  lastEventAt?: string | null;
+};
+
+const SHIFT_SCHEDULE_DAYS = [
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday",
+] as const;
+
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function isSupabaseAuthUserId(id: string | null | undefined): boolean {
   if (!id) return false;
   return UUID_RE.test(id);
+}
+
+function asRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
+
+function pickString(row: Record<string, unknown>, keys: readonly string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function pickNullableString(
+  row: Record<string, unknown>,
+  keys: readonly string[],
+): string | null {
+  const text = pickString(row, keys);
+  return text || null;
+}
+
+async function attendanceBearerToken(): Promise<string> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    throw new Error("Sign in with your dashboard account to use attendance.");
+  }
+  return session.access_token;
+}
+
+function attendanceUrl(path: string, params?: Record<string, string | null | undefined>): string {
+  const base = AGENT_ATTENDANCE_API_URL.replace(/\/+$/, "");
+  const url = new URL(`${base}${path.startsWith("/") ? path : `/${path}`}`, window.location.origin);
+  for (const [key, value] of Object.entries(params ?? {})) {
+    const text = value?.trim();
+    if (text) url.searchParams.set(key, text);
+  }
+  return url.toString();
+}
+
+async function attendanceFetch(
+  path: string,
+  init: RequestInit = {},
+  params?: Record<string, string | null | undefined>,
+): Promise<Response> {
+  const token = await attendanceBearerToken();
+  const headers = new Headers(init.headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  headers.set("Authorization", `Bearer ${token}`);
+  return fetch(attendanceUrl(path, params), { ...init, headers });
+}
+
+function shiftSchedulesUrl(path = ""): string {
+  const base = AGENT_SHIFT_SCHEDULES_API_URL.replace(/\/+$/, "");
+  const suffix = path.trim() ? (path.startsWith("/") ? path : `/${path}`) : "";
+  return new URL(`${base}${suffix}`, window.location.origin).toString();
+}
+
+async function shiftSchedulesFetch(path = "", init: RequestInit = {}): Promise<Response> {
+  const token = await attendanceBearerToken();
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  headers.set("Authorization", `Bearer ${token}`);
+  return fetch(shiftSchedulesUrl(path), { ...init, headers });
+}
+
+function parseTimeMs(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (raw == null) return null;
+  const t = new Date(String(raw)).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+
+async function readHttpErrorDetail(res: Response): Promise<string> {
+  const text = await res.text();
+  if (!text.trim()) return "";
+  try {
+    const body = asRecord(JSON.parse(text) as unknown);
+    const detail = body.message ?? body.error ?? body.detail;
+    return typeof detail === "string" ? detail : text.slice(0, 400);
+  } catch {
+    return text.slice(0, 400);
+  }
+}
+
+async function readJsonBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  return text.trim() ? (JSON.parse(text) as unknown) : null;
+}
+
+function collectRows(raw: unknown, keys: readonly string[]): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  const body = asRecord(raw);
+  for (const key of keys) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+  }
+  if (Array.isArray(body.data)) return body.data;
+  const data = asRecord(body.data);
+  for (const key of keys) {
+    const value = data[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function normalizeShiftScheduleValue(raw: unknown): string | null {
+  if (raw == null) return null;
+  const text = String(raw).trim();
+  if (!text || text.toUpperCase() === "OFF") return null;
+  return text;
+}
+
+function normalizeAgentShiftSchedule(raw: unknown): AgentShiftSchedule {
+  const row = asRecord(raw);
+  const agentId = pickString(row, ["agentId", "agent_id", "userId", "user_id"]);
+  return {
+    id: pickString(row, ["id", "scheduleId", "schedule_id"]) || agentId,
+    agentId,
+    monday: normalizeShiftScheduleValue(row.monday),
+    tuesday: normalizeShiftScheduleValue(row.tuesday),
+    wednesday: normalizeShiftScheduleValue(row.wednesday),
+    thursday: normalizeShiftScheduleValue(row.thursday),
+    friday: normalizeShiftScheduleValue(row.friday),
+    saturday: normalizeShiftScheduleValue(row.saturday),
+    sunday: normalizeShiftScheduleValue(row.sunday),
+    createdAt: pickString(row, ["createdAt", "created_at"]) || undefined,
+    updatedAt: pickString(row, ["updatedAt", "updated_at"]) || undefined,
+  };
+}
+
+function extractShiftSchedules(raw: unknown): AgentShiftSchedule[] {
+  return collectRows(raw, [
+    "agentShiftSchedules",
+    "shiftSchedules",
+    "schedules",
+    "items",
+    "results",
+    "rows",
+  ])
+    .map(normalizeAgentShiftSchedule)
+    .filter((row) => row.agentId);
+}
+
+function shiftSchedulePayload(
+  schedule: Partial<AgentShiftSchedule>,
+): Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null> {
+  return SHIFT_SCHEDULE_DAYS.reduce(
+    (payload, day) => {
+      payload[day] = normalizeShiftScheduleValue(schedule[day]);
+      return payload;
+    },
+    {} as Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null>,
+  );
+}
+
+function extractShiftSchedule(
+  raw: unknown,
+  fallbackAgentId: string,
+  fallbackPayload: Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null>,
+): AgentShiftSchedule {
+  const body = asRecord(raw);
+  for (const key of ["agentShiftSchedule", "shiftSchedule", "schedule", "data", "item", "row", "result"]) {
+    const value = body[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const schedule = normalizeAgentShiftSchedule(value);
+      return schedule.agentId ? schedule : normalizeAgentShiftSchedule({ agentId: fallbackAgentId, ...fallbackPayload });
+    }
+  }
+
+  const direct = normalizeAgentShiftSchedule(raw);
+  if (direct.agentId) return direct;
+  return normalizeAgentShiftSchedule({ agentId: fallbackAgentId, ...fallbackPayload });
+}
+
+function normalizeAttendanceEvent(raw: unknown): AgentAttendanceEventRow {
+  const row = asRecord(raw);
+  const occurredAt =
+    pickString(row, ["occurred_at", "occurredAt", "timestamp", "created_at", "createdAt"]) ||
+    new Date().toISOString();
+  const eventType = pickString(row, ["event_type", "eventType", "type"]);
+  return {
+    id:
+      pickString(row, ["id", "eventId", "event_id"]) ||
+      `${pickString(row, ["user_id", "userId", "agentId", "agent_id"])}-${eventType}-${occurredAt}`,
+    user_id: pickString(row, ["user_id", "userId", "agentId", "agent_id"]),
+    tenant_id: pickNullableString(row, ["tenant_id", "tenantId"]),
+    agent_display_name: pickNullableString(row, [
+      "agent_display_name",
+      "agentDisplayName",
+      "agentName",
+      "displayName",
+    ]),
+    event_type: eventType,
+    occurred_at: occurredAt,
+    created_at: pickString(row, ["created_at", "createdAt"]) || occurredAt,
+  };
+}
+
+function extractEvents(raw: unknown): AgentAttendanceEventRow[] {
+  return collectRows(raw, ["events", "attendanceEvents", "items", "results", "rows"])
+    .map(normalizeAttendanceEvent)
+    .filter((row) => row.user_id && ATTENDANCE_EVENT_TYPES.includes(row.event_type as AttendanceEventType))
+    .sort((a, b) => new Date(a.occurred_at).getTime() - new Date(b.occurred_at).getTime());
+}
+
+function filterEventsForRange(
+  events: AgentAttendanceEventRow[],
+  startIso: string,
+  endIso: string,
+  userId?: string,
+): AgentAttendanceEventRow[] {
+  const startMs = new Date(startIso).getTime();
+  const endMs = new Date(endIso).getTime();
+  return events.filter((event) => {
+    const t = new Date(event.occurred_at).getTime();
+    if (Number.isFinite(startMs) && t < startMs) return false;
+    if (Number.isFinite(endMs) && t > endMs) return false;
+    if (userId && event.user_id !== userId) return false;
+    return true;
+  });
+}
+
+async function fetchAttendanceEventsFromApi(params: {
+  userId?: string | null;
+  startIso?: string;
+  endIso?: string;
+} = {}): Promise<AgentAttendanceEventRow[]> {
+  const res = await attendanceFetch("/events", {}, {
+    userId: params.userId,
+    startDate: params.startIso,
+    endDate: params.endIso,
+  });
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`Attendance events API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
+  return extractEvents(await readJsonBody(res));
+}
+
+export async function fetchAttendanceStatus(userId?: string | null): Promise<AgentAttendanceStatusResponse> {
+  const res = await attendanceFetch("/status", {}, { userId });
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`Attendance status API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
+  const body = asRecord(await readJsonBody(res));
+  const statusRaw = pickString(body, ["status", "shiftStatus"]);
+  const statusKey = statusRaw.trim().toLowerCase().replace(/[-\s]/g, "_");
+  const status: AttendanceShiftStatus =
+    ["working", "on_shift", "clocked_in", "clock_in", "active"].includes(statusKey)
+      ? "working"
+      : ["on_break", "break", "break_start"].includes(statusKey)
+        ? "on_break"
+        : "off_clock";
+  const shiftStartedAtRaw = body.shiftStartedAt ?? body.shift_started_at;
+  const breakStartedAtRaw = body.breakStartedAt ?? body.break_started_at;
+  return {
+    status,
+    shiftStartedAt: parseTimeMs(shiftStartedAtRaw),
+    breakStartedAt: parseTimeMs(breakStartedAtRaw),
+    lastEventType: pickNullableString(body, ["lastEventType", "last_event_type"]),
+    lastEventAt: pickNullableString(body, ["lastEventAt", "last_event_at"]),
+  };
+}
+
+function attendanceAuditAction(eventType: AttendanceEventType): string | null {
+  if (eventType === "clock_in") return AUDIT_ACTION_ATTENDANCE_CLOCK_IN;
+  if (eventType === "clock_out") return AUDIT_ACTION_ATTENDANCE_CLOCK_OUT;
+  return null;
+}
+
+function logAttendanceAuditEvent(
+  eventType: AttendanceEventType,
+  details: Record<string, unknown> = {},
+): void {
+  const action = attendanceAuditAction(eventType);
+  if (!action) return;
+  const agentId = typeof details.agentId === "string" ? details.agentId : undefined;
+  void postSystemAuditLog({
+    action,
+    resourceType: "agent_attendance",
+    resourceId: agentId,
+    details: {
+      eventType,
+      ...details,
+    },
+  }).catch(() => {});
+}
+
+async function postAttendanceEvent(
+  eventType: AttendanceEventType,
+  auditDetails?: Record<string, unknown>,
+): Promise<Response> {
+  const res = await attendanceFetch("/events", {
+    method: "POST",
+    body: JSON.stringify({ eventType }),
+  });
+  if (res.ok) {
+    logAttendanceAuditEvent(eventType, auditDetails);
+  }
+  return res;
+}
+
+function isBeforeTodayMelbourne(ms: number | null): boolean {
+  if (ms == null || !Number.isFinite(ms)) return false;
+  return getAustralianDateKey(ms) < getAustralianDateKey(Date.now());
+}
+
+async function deriveOpenShiftFromEvents(): Promise<{
+  status: AttendanceShiftStatus;
+  openSince: number | null;
+}> {
+  const events = await fetchAttendanceEventsFromApi().catch(() => []);
+  const status = deriveAttendanceShiftStatus(events);
+  return {
+    status: status.status,
+    openSince: status.shiftStartedAt ?? status.breakStartedAt,
+  };
+}
+
+async function closeStaleOpenShiftIfNeeded(options?: {
+  /**
+   * Used only after the backend rejects clock_in with "while on shift".
+   * If the backend does not expose any timestamp, close the open shift so the agent can start today.
+   */
+  closeWhenTimestampUnknown?: boolean;
+}): Promise<boolean> {
+  const status = await fetchAttendanceStatus();
+  if (status.status === "off_clock") return false;
+
+  const lastEventMs = parseTimeMs(status.lastEventAt);
+  let currentStatus = status.status;
+  let openSince = status.shiftStartedAt ?? status.breakStartedAt ?? lastEventMs;
+
+  if (openSince == null) {
+    const fromEvents = await deriveOpenShiftFromEvents();
+    if (fromEvents.status !== "off_clock") {
+      currentStatus = fromEvents.status;
+      openSince = fromEvents.openSince;
+    }
+  }
+
+  if (!isBeforeTodayMelbourne(openSince)) {
+    if (openSince != null || !options?.closeWhenTimestampUnknown) return false;
+  }
+
+  if (currentStatus === "on_break") {
+    const endBreak = await postAttendanceEvent("break_end", { autoClosedStaleShift: true });
+    if (!endBreak.ok) {
+      const detail = await readHttpErrorDetail(endBreak);
+      throw new Error(`Auto end-break failed: ${endBreak.status}${detail ? ` - ${detail}` : ""}`);
+    }
+  }
+
+  const clockOut = await postAttendanceEvent("clock_out", { autoClosedStaleShift: true });
+  if (!clockOut.ok) {
+    const detail = await readHttpErrorDetail(clockOut);
+    throw new Error(`Auto clock-out failed: ${clockOut.status}${detail ? ` - ${detail}` : ""}`);
+  }
+
+  return true;
+}
+
+async function closeBackendOpenShiftFromConflict(detail: string): Promise<boolean> {
+  const canClockOut = /allowed next:.*clock_out|clock_out/i.test(detail);
+  const canEndBreak = /allowed next:.*break_end|break_end/i.test(detail);
+
+  if (canEndBreak) {
+    const endBreak = await postAttendanceEvent("break_end", { resolvedBackendConflict: true });
+    if (!endBreak.ok && endBreak.status !== 409) return false;
+  }
+
+  if (!canClockOut && !canEndBreak) return false;
+
+  const clockOut = await postAttendanceEvent("clock_out", { resolvedBackendConflict: true });
+  return clockOut.ok;
 }
 
 /** Melbourne calendar day bounds from a Date instant or yyyy-MM-dd day key. */
@@ -254,35 +674,21 @@ export async function fetchAttendanceEventsForDay(
   day: Date | string,
 ): Promise<AgentAttendanceEventRow[]> {
   const { startIso, endIso } = attendanceDayRange(day);
-  const { data, error } = await supabase
-    .from("agent_attendance_events")
-    .select(
-      "id,user_id,tenant_id,agent_display_name,event_type,occurred_at,created_at",
-    )
-    .eq("user_id", userId)
-    .gte("occurred_at", startIso)
-    .lte("occurred_at", endIso)
-    .order("occurred_at", { ascending: true });
-
-  if (error) throw new Error(error.message);
-  return (data || []) as AgentAttendanceEventRow[];
+  const apiUserId = isSupabaseAuthUserId(userId) ? undefined : userId;
+  const rows = await fetchAttendanceEventsFromApi({
+    userId: apiUserId,
+    startIso,
+    endIso,
+  });
+  return filterEventsForRange(rows, startIso, endIso, apiUserId);
 }
 
 export async function fetchAllAttendanceEventsForDay(
   day: Date | string,
 ): Promise<AgentAttendanceEventRow[]> {
   const { startIso, endIso } = attendanceDayRange(day);
-  const { data, error } = await supabase
-    .from("agent_attendance_events")
-    .select(
-      "id,user_id,tenant_id,agent_display_name,event_type,occurred_at,created_at",
-    )
-    .gte("occurred_at", startIso)
-    .lte("occurred_at", endIso)
-    .order("occurred_at", { ascending: true });
-
-  if (error) throw new Error(error.message);
-  return (data || []) as AgentAttendanceEventRow[];
+  const rows = await fetchAttendanceEventsFromApi({ startIso, endIso });
+  return filterEventsForRange(rows, startIso, endIso);
 }
 
 /** Fetch all attendance events for any arbitrary date range (used for weekly/monthly views). */
@@ -290,17 +696,10 @@ export async function fetchAllAttendanceEventsForRange(
   rangeStart: Date,
   rangeEnd: Date,
 ): Promise<AgentAttendanceEventRow[]> {
-  const { data, error } = await supabase
-    .from("agent_attendance_events")
-    .select(
-      "id,user_id,tenant_id,agent_display_name,event_type,occurred_at,created_at",
-    )
-    .gte("occurred_at", startOfDay(rangeStart).toISOString())
-    .lte("occurred_at", endOfDay(rangeEnd).toISOString())
-    .order("occurred_at", { ascending: true });
-
-  if (error) throw new Error(error.message);
-  return (data || []) as AgentAttendanceEventRow[];
+  const startIso = startOfDay(rangeStart).toISOString();
+  const endIso = endOfDay(rangeEnd).toISOString();
+  const rows = await fetchAttendanceEventsFromApi({ startIso, endIso });
+  return filterEventsForRange(rows, startIso, endIso);
 }
 
 export async function insertAttendanceEvent(
@@ -311,19 +710,39 @@ export async function insertAttendanceEvent(
     displayName: string;
   },
 ): Promise<void> {
-  const { data: authData, error: authErr } = await supabase.auth.getUser();
-  if (authErr || !authData.user || authData.user.id !== opts.userId) {
-    throw new Error("Sign in with your dashboard account to record attendance.");
+  void opts;
+  if (eventType === "clock_in") {
+    await closeStaleOpenShiftIfNeeded();
   }
 
-  const { error } = await supabase.from("agent_attendance_events").insert({
-    user_id: opts.userId,
-    tenant_id: opts.tenantId,
-    agent_display_name: opts.displayName || null,
-    event_type: eventType,
-  });
+  const auditDetails = {
+    agentId: opts.userId,
+    tenantId: opts.tenantId,
+    displayName: opts.displayName,
+  };
 
-  if (error) throw new Error(error.message);
+  const res = await postAttendanceEvent(eventType, auditDetails);
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    if (
+      eventType === "clock_in" &&
+      res.status === 409 &&
+      /while on shift|allowed next/i.test(detail) &&
+      ((await closeStaleOpenShiftIfNeeded({ closeWhenTimestampUnknown: true })) ||
+        (await closeBackendOpenShiftFromConflict(detail)))
+    ) {
+      const retry = await postAttendanceEvent(eventType, {
+        ...auditDetails,
+        retriedAfterStaleShiftClose: true,
+      });
+      if (retry.ok) return;
+      const retryDetail = await readHttpErrorDetail(retry);
+      throw new Error(
+        `Attendance event API failed: ${retry.status}${retryDetail ? ` - ${retryDetail}` : ""}`,
+      );
+    }
+    throw new Error(`Attendance event API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
 }
 
 export async function ensureClockedOut(opts: {
@@ -331,42 +750,35 @@ export async function ensureClockedOut(opts: {
   tenantId: string | null;
   displayName: string;
 }): Promise<void> {
-  const { data: events, error: fetchErr } = await supabase
-    .from("agent_attendance_events")
-    .select("event_type, occurred_at")
-    .eq("user_id", opts.userId)
-    .gte("occurred_at", startOfDay(new Date()).toISOString())
-    .order("occurred_at", { ascending: true });
-
-  if (fetchErr) return; // Silent fail if we can't check
-
-  const { status } = deriveAttendanceShiftStatus(events || []);
+  void opts;
+  const { status } = await fetchAttendanceStatus().catch(() => ({
+    status: "off_clock" as AttendanceShiftStatus,
+  }));
   if (status === "off_clock") return;
-
   if (status === "on_break") {
-    await supabase.from("agent_attendance_events").insert({
-      user_id: opts.userId,
-      tenant_id: opts.tenantId,
-      agent_display_name: opts.displayName || null,
-      event_type: "break_end",
-    });
+    await postAttendanceEvent("break_end", {
+      agentId: opts.userId,
+      tenantId: opts.tenantId,
+      displayName: opts.displayName,
+      autoClockOutOnSignOut: true,
+    }).catch(() => {});
   }
-
-  await supabase.from("agent_attendance_events").insert({
-    user_id: opts.userId,
-    tenant_id: opts.tenantId,
-    agent_display_name: opts.displayName || null,
-    event_type: "clock_out",
-  });
+  await postAttendanceEvent("clock_out", {
+    agentId: opts.userId,
+    tenantId: opts.tenantId,
+    displayName: opts.displayName,
+    autoClockOutOnSignOut: true,
+  }).catch(() => {});
 }
 
 
 export function subscribeToMyAttendanceEvents(
   userId: string,
   onEvent: (row: AgentAttendanceEventRow) => void,
+  channelSuffix?: string,
 ): () => void {
   const channel = supabase
-    .channel(`attendance-self-${userId}`)
+    .channel(`attendance-self-${userId}${channelSuffix ? `-${channelSuffix}` : ""}`)
     .on(
       "postgres_changes",
       {
@@ -412,68 +824,44 @@ export function subscribeToAllAttendanceInserts(
 }
 
 export async function fetchAgentShiftSchedules(): Promise<AgentShiftSchedule[]> {
-  const { data, error } = await supabase
-    .from("agent_shift_schedules")
-    .select("*");
-
-  if (error) throw new Error(error.message);
-  return (data || []).map((row: any) => ({
-    id: row.id,
-    agentId: row.agent_id,
-    monday: row.monday,
-    tuesday: row.tuesday,
-    wednesday: row.wednesday,
-    thursday: row.thursday,
-    friday: row.friday,
-    saturday: row.saturday,
-    sunday: row.sunday,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  }));
+  const res = await shiftSchedulesFetch();
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`Shift schedules API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
+  return extractShiftSchedules(await readJsonBody(res));
 }
 
 export async function fetchMyShiftSchedule(agentId: string): Promise<AgentShiftSchedule | null> {
-  const { data, error } = await supabase
-    .from("agent_shift_schedules")
-    .select("*")
-    .eq("agent_id", agentId)
-    .maybeSingle();
-
-  if (error) throw new Error(error.message);
-  if (!data) return null;
-
-  return {
-    id: data.id,
-    agentId: data.agent_id,
-    monday: data.monday,
-    tuesday: data.tuesday,
-    wednesday: data.wednesday,
-    thursday: data.thursday,
-    friday: data.friday,
-    saturday: data.saturday,
-    sunday: data.sunday,
-    createdAt: data.created_at,
-    updatedAt: data.updated_at,
-  };
+  const schedules = await fetchAgentShiftSchedules();
+  return schedules.find((schedule) => schedule.agentId === agentId) ?? null;
 }
 
 export async function upsertAgentShiftSchedule(
   schedule: Partial<AgentShiftSchedule> & { agentId: string },
-): Promise<void> {
-  const payload = {
-    agent_id: schedule.agentId,
-    monday: schedule.monday,
-    tuesday: schedule.tuesday,
-    wednesday: schedule.wednesday,
-    thursday: schedule.thursday,
-    friday: schedule.friday,
-    saturday: schedule.saturday,
-    sunday: schedule.sunday,
-  };
+): Promise<AgentShiftSchedule> {
+  if (!schedule.agentId?.trim()) {
+    throw new Error("Choose an agent before saving a shift schedule.");
+  }
 
-  const { error } = await supabase
-    .from("agent_shift_schedules")
-    .upsert(payload, { onConflict: "agent_id" });
+  const agentId = schedule.agentId.trim();
+  const payload = shiftSchedulePayload(schedule);
+  const res = await shiftSchedulesFetch(`/${encodeURIComponent(agentId)}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
 
-  if (error) throw new Error(error.message);
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`Shift schedule API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
+
+  const saved = extractShiftSchedule(await readJsonBody(res), agentId, payload);
+  void postSystemAuditLog({
+    action: AUDIT_ACTION_SHIFT_SCHEDULE_UPDATE,
+    resourceType: "agent_shift_schedule",
+    resourceId: agentId,
+    details: { schedule: payload },
+  }).catch(() => {});
+  return saved;
 }

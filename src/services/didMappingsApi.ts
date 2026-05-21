@@ -9,11 +9,21 @@
 
 import { supabase } from '@/integrations/supabase/client';
 import { getBmsBearerToken } from '@/services/bmsAuth';
+import {
+  AUDIT_ACTION_DID_MAPPING_CREATE,
+  AUDIT_ACTION_DID_MAPPING_DELETE,
+  AUDIT_ACTION_DID_MAPPING_UPDATE,
+  postSystemAuditLog,
+} from './auditLogApi';
 import type { DIDMapping } from './types';
 
 const BASE_URL =
   (import.meta.env.VITE_BMS_API_URL as string) ??
   'https://black.bmspros.com.au/api/call-center';
+
+const DID_MAPPINGS_API_URL =
+  (import.meta.env.VITE_DID_MAPPINGS_API_URL as string | undefined)?.trim() ||
+  'http://127.0.0.1:5050/api/did-mappings';
 
 /* ─── Types ─── */
 
@@ -212,77 +222,207 @@ export async function fetchBmsWorkshopOptions(): Promise<BmsWorkshopOption[]> {
   return results.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/* ─── Supabase CRUD ─── */
+/* ─── DID mappings API CRUD ─── */
 
-type UntypedSupabase = {
-  from: (table: string) => {
-    select: (...args: unknown[]) => any;
-    insert: (...args: unknown[]) => any;
-    update: (...args: unknown[]) => any;
-    upsert: (...args: unknown[]) => any;
-    delete: (...args: unknown[]) => any;
-  };
-};
+function asRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
 
-const dynamicSupabase = supabase as unknown as UntypedSupabase;
+function pickString(
+  row: Record<string, unknown>,
+  keys: readonly string[],
+): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+}
 
 function rowToMapping(d: Record<string, unknown>): DIDMapping {
   return {
-    did: String(d.did ?? ''),
-    tenantId: String(d.tenant_id ?? ''),
-    queueId: String(d.queue_id ?? ''),
-    label: String(d.label ?? ''),
-    branchId: String(d.branch_id ?? ''),
-    branchName: String(d.branch_name ?? ''),
-    mappingWorkshopName: String(d.workshop_name ?? ''),
-    ownerId: String(d.owner_id ?? ''),
+    did: pickString(d, ['did']),
+    tenantId: pickString(d, ['tenantId', 'tenant_id']),
+    queueId: pickString(d, ['queueId', 'queue_id']),
+    label: pickString(d, ['label']),
+    branchId: pickString(d, ['branchId', 'branch_id']),
+    branchName: pickString(d, ['branchName', 'branch_name']),
+    mappingWorkshopName: pickString(d, [
+      'mappingWorkshopName',
+      'workshopName',
+      'workshop_name',
+    ]),
+    ownerId: pickString(d, ['ownerId', 'ownerUid', 'owner_id']),
   };
 }
 
-export async function listDIDMappings(): Promise<DIDMapping[]> {
-  const { data, error } = await dynamicSupabase
-    .from('did_mappings')
-    .select('*')
-    .order('did', { ascending: true });
-  if (error) throw new Error(error.message);
-  return (data || []).map((row: Record<string, unknown>) => rowToMapping(row));
-}
-
-function toRow(input: DIDMappingInput) {
+function toApiPayload(input: DIDMappingInput) {
   return {
     did: input.did.trim(),
     label: input.label.trim(),
-    tenant_id: input.tenantId,
-    queue_id: input.queueId,
-    owner_id: input.ownerUid,
-    workshop_name: input.workshopName,
-    branch_id: input.branchId,
-    branch_name: input.branchName,
+    tenantId: input.tenantId,
+    queueId: input.queueId,
+    ownerUid: input.ownerUid,
+    workshopName: input.workshopName,
+    branchId: input.branchId,
+    branchName: input.branchName,
   };
 }
 
-export async function createDIDMapping(input: DIDMappingInput): Promise<DIDMapping> {
-  const { data, error } = await dynamicSupabase
-    .from('did_mappings')
-    .insert(toRow(input))
-    .select('*')
-    .single();
-  if (error) throw new Error(error.message);
-  return rowToMapping(data as Record<string, unknown>);
+async function getDidMappingsBearerToken(): Promise<string> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (session?.access_token) {
+    return session.access_token;
+  }
+
+  throw new Error('Sign in as super-admin to manage DID mappings.');
 }
 
-/** The DID is the PK — upsert makes "edit" idempotent without extra plumbing. */
+function didMappingsUrl(did?: string): string {
+  const base = DID_MAPPINGS_API_URL.replace(/\/+$/, '');
+  const path = did?.trim() ? `${base}/${encodeURIComponent(did.trim())}` : base;
+  const url = new URL(path, window.location.origin);
+  return url.toString();
+}
+
+async function apiHeaders(): Promise<HeadersInit> {
+  const token = await getDidMappingsBearerToken();
+  return {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+  };
+}
+
+async function readHttpErrorDetail(res: Response): Promise<string> {
+  const text = await res.text();
+  if (!text.trim()) return '';
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const body = asRecord(parsed);
+    const detail = body.message ?? body.error ?? body.detail;
+    return typeof detail === 'string' ? detail : text.slice(0, 400);
+  } catch {
+    return text.slice(0, 400);
+  }
+}
+
+async function parseJsonBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  if (!text.trim()) return null;
+  return JSON.parse(text) as unknown;
+}
+
+function extractMappingRows(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  const body = asRecord(raw);
+  for (const key of ['mappings', 'didMappings', 'data', 'items', 'results']) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function extractMapping(raw: unknown, fallback: DIDMappingInput): DIDMapping {
+  const body = asRecord(raw);
+  for (const key of ['mapping', 'didMapping', 'data', 'item', 'result']) {
+    const value = body[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return rowToMapping(value as Record<string, unknown>);
+    }
+  }
+
+  const mapped = rowToMapping(body);
+  return mapped.did ? mapped : rowToMapping(toApiPayload(fallback));
+}
+
+async function requestDidMappings(
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  options: { did?: string; body?: unknown } = {},
+): Promise<unknown> {
+  const res = await fetch(didMappingsUrl(options.did), {
+    method,
+    headers: await apiHeaders(),
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `DID mappings API ${method} failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
+    );
+  }
+
+  return parseJsonBody(res);
+}
+
+export async function listDIDMappings(): Promise<DIDMapping[]> {
+  const raw = await requestDidMappings('GET');
+  return extractMappingRows(raw)
+    .map((row) => rowToMapping(asRecord(row)))
+    .filter((mapping) => mapping.did)
+    .sort((a, b) => a.did.localeCompare(b.did));
+}
+
+export async function createDIDMapping(input: DIDMappingInput): Promise<DIDMapping> {
+  const raw = await requestDidMappings('POST', { body: toApiPayload(input) });
+  const mapping = extractMapping(raw, input);
+  void postSystemAuditLog({
+    action: AUDIT_ACTION_DID_MAPPING_CREATE,
+    resourceType: 'did_mapping',
+    resourceId: mapping.did,
+    details: {
+      tenantId: mapping.tenantId,
+      queueId: mapping.queueId,
+      branchId: mapping.branchId,
+      ownerId: mapping.ownerId,
+    },
+  }).catch(() => {});
+  return mapping;
+}
+
+export async function updateDIDMapping(input: DIDMappingInput): Promise<DIDMapping> {
+  const payload = toApiPayload(input);
+  const raw = await requestDidMappings('PATCH', {
+    did: input.did,
+    body: { ...payload, originalDid: input.did },
+  });
+  const mapping = extractMapping(raw, input);
+  void postSystemAuditLog({
+    action: AUDIT_ACTION_DID_MAPPING_UPDATE,
+    resourceType: 'did_mapping',
+    resourceId: mapping.did,
+    details: {
+      tenantId: mapping.tenantId,
+      queueId: mapping.queueId,
+      branchId: mapping.branchId,
+      ownerId: mapping.ownerId,
+    },
+  }).catch(() => {});
+  return mapping;
+}
+
+/** Backwards-compatible helper for existing callers. */
 export async function upsertDIDMapping(input: DIDMappingInput): Promise<DIDMapping> {
-  const { data, error } = await dynamicSupabase
-    .from('did_mappings')
-    .upsert(toRow(input), { onConflict: 'did' })
-    .select('*')
-    .single();
-  if (error) throw new Error(error.message);
-  return rowToMapping(data as Record<string, unknown>);
+  return updateDIDMapping(input);
 }
 
 export async function deleteDIDMapping(did: string): Promise<void> {
-  const { error } = await dynamicSupabase.from('did_mappings').delete().eq('did', did);
-  if (error) throw new Error(error.message);
+  await requestDidMappings('DELETE', {
+    did,
+    body: { did },
+  });
+  void postSystemAuditLog({
+    action: AUDIT_ACTION_DID_MAPPING_DELETE,
+    resourceType: 'did_mapping',
+    resourceId: did,
+    details: { did },
+  }).catch(() => {});
 }

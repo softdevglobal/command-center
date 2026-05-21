@@ -4,7 +4,8 @@ import type { DIDMapping, Permissions, Queue, Tenant } from '@/services/types';
 import {
   fetchBmsWorkshopOptions,
   listDIDMappings,
-  upsertDIDMapping,
+  createDIDMapping,
+  updateDIDMapping,
   deleteDIDMapping,
   type BmsWorkshopOption,
   type DIDMappingInput,
@@ -172,7 +173,11 @@ export function DIDMappingsTab({ permissions }: Props) {
         branchId: branch.id,
         branchName: branch.name,
       };
-      await upsertDIDMapping(payload);
+      if (editingDid) {
+        await updateDIDMapping(payload);
+      } else {
+        await createDIDMapping(payload);
+      }
       toast({
         title: editingDid ? 'Mapping updated' : 'Mapping created',
         description: `${payload.did} → ${payload.workshopName} · ${payload.branchName}`,

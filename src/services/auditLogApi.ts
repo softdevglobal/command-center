@@ -5,6 +5,28 @@ const SYSTEM_AUDIT_LOGS_API_URL =
   (import.meta.env.VITE_SYSTEM_AUDIT_LOGS_API_URL as string | undefined)?.trim() ||
   'http://127.0.0.1:5050/api/system-audit-logs';
 
+export const SYSTEM_AUDIT_LOG_ACTIONS = [
+  'auth.login',
+  'attendance.clock_in',
+  'attendance.clock_out',
+  'message.viewed',
+  'message.reply',
+  'leave_request.create',
+  'leave_request.update',
+  'shift_schedule.create',
+  'shift_schedule.update',
+  'notification.viewed',
+  'booking.create',
+  'agent.register',
+  'did_mapping.create',
+  'did_mapping.update',
+  'did_mapping.delete',
+] as const;
+
+export type SystemAuditLogAction = (typeof SYSTEM_AUDIT_LOG_ACTIONS)[number];
+
+const SYSTEM_AUDIT_LOG_ACTION_SET = new Set<string>(SYSTEM_AUDIT_LOG_ACTIONS);
+
 type SupabaseAuditQueryResult = {
   data: unknown;
   error: unknown;
@@ -38,13 +60,34 @@ export interface AuditLogEntry {
   details?: Record<string, unknown>;
 }
 
+export interface SystemAuditLogPostInput {
+  action: SystemAuditLogAction | string;
+  resourceType: string;
+  resourceId?: string | null;
+  details?: Record<string, unknown>;
+}
+
+export const AUDIT_ACTION_AUTH_LOGIN = 'auth.login';
+export const AUDIT_ACTION_ATTENDANCE_CLOCK_IN = 'attendance.clock_in';
+export const AUDIT_ACTION_ATTENDANCE_CLOCK_OUT = 'attendance.clock_out';
+export const AUDIT_ACTION_LEAVE_REQUEST_CREATE = 'leave_request.create';
+export const AUDIT_ACTION_LEAVE_REQUEST_UPDATE = 'leave_request.update';
+export const AUDIT_ACTION_SHIFT_SCHEDULE_CREATE = 'shift_schedule.create';
+export const AUDIT_ACTION_SHIFT_SCHEDULE_UPDATE = 'shift_schedule.update';
+export const AUDIT_ACTION_NOTIFICATION_VIEWED = 'notification.viewed';
+export const AUDIT_ACTION_BOOKING_CREATE = 'booking.create';
+export const AUDIT_ACTION_AGENT_REGISTER = 'agent.register';
+export const AUDIT_ACTION_DID_MAPPING_CREATE = 'did_mapping.create';
+export const AUDIT_ACTION_DID_MAPPING_UPDATE = 'did_mapping.update';
+export const AUDIT_ACTION_DID_MAPPING_DELETE = 'did_mapping.delete';
+
 /** Resource type recorded for support / BMS chat threads in {@link logSystemActivity}. */
 export const AUDIT_RESOURCE_BMS_CHAT = 'bms_chat';
 
 /** Emitted when an agent opens a BMS chat thread (read receipt posted). */
-export const AUDIT_ACTION_CHAT_VIEWED = 'chat_viewed';
+export const AUDIT_ACTION_CHAT_VIEWED = 'message.viewed';
 /** Emitted when an agent sends a message in a BMS chat. */
-export const AUDIT_ACTION_CHAT_REPLY = 'chat_reply';
+export const AUDIT_ACTION_CHAT_REPLY = 'message.reply';
 
 function parseAuditDetails(raw: unknown): Record<string, unknown> {
   if (raw == null) return {};
@@ -86,6 +129,10 @@ function pickString(
 
 function auditLogsTable(): SupabaseAuditQuery {
   return (supabase as unknown as SupabaseDynamicClient).from('system_audit_logs');
+}
+
+function systemAuditLogsUrl(): string {
+  return new URL(SYSTEM_AUDIT_LOGS_API_URL, window.location.origin).toString();
 }
 
 /** Normalize DB / client variants so UI matching stays stable. */
@@ -142,6 +189,14 @@ async function getSuperAdminAuditBearerToken(): Promise<string> {
   throw new Error('Sign in as super-admin to load audit logs.');
 }
 
+async function getAuditBearerToken(): Promise<string | null> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  return session?.access_token ?? null;
+}
+
 function auditLogsUrl(limit: number): string {
   const url = new URL(SYSTEM_AUDIT_LOGS_API_URL, window.location.origin);
   if (limit > 0) {
@@ -177,19 +232,84 @@ function normKey(s: string | undefined | null): string {
   return (s ?? '')
     .trim()
     .toLowerCase()
-    .replace(/-/g, '_');
+    .replace(/[.-]/g, '_');
 }
 
 export function isAuditChatSupportEntry(log: AuditLogEntry): boolean {
   const a = normKey(log.action);
   const t = normKey(log.resource_type);
-  if (!['chat_viewed', 'chat_reply'].includes(a)) return false;
+  if (!['chat_viewed', 'chat_reply', 'message_viewed', 'message_reply'].includes(a)) return false;
   return t === 'bms_chat' || t === 'support_chat';
+}
+
+function normalizeAuditLogAction(action: string): string {
+  const key = action.trim().toLowerCase().replace(/[ .-]/g, '_');
+  switch (key) {
+    case 'login':
+    case 'auth_login':
+      return AUDIT_ACTION_AUTH_LOGIN;
+    case 'create_booking':
+    case 'booking_create':
+      return AUDIT_ACTION_BOOKING_CREATE;
+    case 'chat_viewed':
+    case 'message_viewed':
+      return AUDIT_ACTION_CHAT_VIEWED;
+    case 'chat_reply':
+    case 'message_reply':
+      return AUDIT_ACTION_CHAT_REPLY;
+    case 'notification_viewed':
+    case 'notification_view':
+      return AUDIT_ACTION_NOTIFICATION_VIEWED;
+    default:
+      return action.trim();
+  }
+}
+
+function isSystemAuditLogAction(action: string): action is SystemAuditLogAction {
+  return SYSTEM_AUDIT_LOG_ACTION_SET.has(action);
+}
+
+export async function postSystemAuditLog(input: SystemAuditLogPostInput): Promise<void> {
+  const action = normalizeAuditLogAction(input.action);
+  const resourceType = input.resourceType.trim();
+
+  if (!action) throw new Error('Audit action is required.');
+  if (!isSystemAuditLogAction(action)) {
+    throw new Error(`Unsupported audit action: ${action}`);
+  }
+  if (!resourceType) throw new Error('Audit resourceType is required.');
+
+  const token = await getAuditBearerToken();
+  const headers = new Headers({
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+  });
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  const res = await fetch(systemAuditLogsUrl(), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      action,
+      resourceType,
+      resourceId: input.resourceId ?? null,
+      details: input.details ?? {},
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `postSystemAuditLog failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
+    );
+  }
 }
 
 /**
  * Logs a system activity for auditing and role-based tracking purposes.
- * Saves the action along with the user's role and details to the Supabase database.
+ * Saves the action through the system audit log API.
  */
 export async function logSystemActivity(
   session: UserSession | null | undefined,
@@ -202,25 +322,46 @@ export async function logSystemActivity(
     // console.warn('[AuditLog] No session provided, skipping audit log for action:', action);
     return;
   }
-  
-  try {
-    const { error } = await auditLogsTable().insert({
-      user_id: session.userId,
-      user_name: session.displayName,
-      user_role: session.role,
-      action,
-      resource_type: resourceType,
-      resource_id: resourceId ?? null,
-      details: details ?? {}
-    });
 
-    if (error) {
-      // console.warn('[AuditLog] Failed to insert audit log. Ensure system_audit_logs table exists:', error);
-    } else {
-      // console.info(`[AuditLog] Logged ${action} by ${session.displayName} (${session.role})`);
+  const normalizedAction = normalizeAuditLogAction(action);
+  const auditDetails = {
+    ...(details ?? {}),
+    actorId: session.userId,
+    actorName: session.displayName,
+    actorRole: session.role,
+    tenantId: session.tenantId,
+  };
+
+  try {
+    if (!isSystemAuditLogAction(normalizedAction)) {
+      throw new Error(`Unsupported audit action: ${normalizedAction}`);
     }
+    await postSystemAuditLog({
+      action: normalizedAction,
+      resourceType,
+      resourceId,
+      details: auditDetails,
+    });
   } catch {
-    // console.error('[AuditLog] Exception logging audit activity:', err);
+    try {
+      const { error } = await auditLogsTable().insert({
+        user_id: session.userId,
+        user_name: session.displayName,
+        user_role: session.role,
+        action: normalizedAction,
+        resource_type: resourceType,
+        resource_id: resourceId ?? null,
+        details: auditDetails,
+      });
+
+      if (error) {
+        // console.warn('[AuditLog] Failed to insert audit log. Ensure system_audit_logs table exists:', error);
+      } else {
+        // console.info(`[AuditLog] Logged ${action} by ${session.displayName} (${session.role})`);
+      }
+    } catch {
+      // console.error('[AuditLog] Exception logging audit activity:', err);
+    }
   }
 }
 

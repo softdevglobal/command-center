@@ -11,6 +11,10 @@ const AGENT_PREFIX = '/agent/conversations';
 const CALL_CENTER_BASE_URL =
   (import.meta.env.VITE_CALL_CENTER_API_URL as string) ?? 'https://black.bmspros.com.au';
 
+const AGENT_CHAT_API_URL =
+  (import.meta.env.VITE_AGENT_CHAT_API_URL as string | undefined)?.trim() ||
+  'http://127.0.0.1:5050/api/agent-chat';
+
 // ── Row from GET /agent/conversations (queue | mine) ──────────────────────
 
 export interface Conversation {
@@ -152,6 +156,28 @@ async function authorizedFetchCallCenter(
   }
   headers.set('Authorization', `Bearer ${token}`);
   const url = `${CALL_CENTER_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
+  return fetch(url, { ...init, headers });
+}
+
+async function authorizedFetchAgentChat(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    throw new Error('Sign in to use internal chat.');
+  }
+
+  const headers = new Headers(init.headers);
+  if (!headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  headers.set('Authorization', `Bearer ${session.access_token}`);
+
+  const base = AGENT_CHAT_API_URL.replace(/\/+$/, '');
+  const url = `${base}${path.startsWith('/') ? path : `/${path}`}`;
   return fetch(url, { ...init, headers });
 }
 
@@ -792,129 +818,256 @@ export interface InternalChatMessage {
   is_read: boolean;
 }
 
+function pickInternalString(
+  row: Record<string, unknown>,
+  keys: readonly string[],
+): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function toInternalAgent(raw: unknown, fallbackId = ''): Agent {
+  const r = asRecord(raw);
+  const id = pickInternalString(r, ['id', 'agentId', 'userId']) || fallbackId;
+  const name = pickInternalString(r, ['name', 'agentName', 'displayName']) || 'Unknown';
+  return {
+    id,
+    userId: pickInternalString(r, ['userId', 'user_id']) || null,
+    tenantId: pickInternalString(r, ['tenantId', 'tenant_id']),
+    queueIds: Array.isArray(r.queueIds) ? r.queueIds.map(String) : [],
+    name,
+    extension: pickInternalString(r, ['extension']),
+    role: 'agent',
+    status:
+      r.status === 'ringing' ||
+      r.status === 'on-call' ||
+      r.status === 'available' ||
+      r.status === 'wrap-up' ||
+      r.status === 'break' ||
+      r.status === 'offline'
+        ? r.status
+        : 'offline',
+    currentCaller: null,
+    callStartTime: null,
+    allowedQueueIds: [],
+    assignedTenantIds: [],
+    groupIds: [],
+  };
+}
+
+function toInternalConversation(
+  raw: unknown,
+  currentAgentId?: string | null,
+): InternalChatConversation {
+  const r = asRecord(raw);
+  const agentARecord = r.agent_a ?? r.agentA ?? r.participantA;
+  const agentBRecord = r.agent_b ?? r.agentB ?? r.participantB;
+  const otherRecord = r.otherParticipant ?? r.peerAgent ?? r.otherAgent ?? r.agent;
+  const peerAgentId =
+    pickInternalString(r, ['peerAgentId', 'peer_agent_id', 'otherAgentId', 'other_agent_id']) ||
+    pickInternalString(asRecord(otherRecord), ['id', 'agentId']);
+  const participantA =
+    pickInternalString(r, [
+      'participant_a',
+      'participantA',
+      'participantAId',
+      'agentAId',
+      'agent_a_id',
+    ]) ||
+    currentAgentId ||
+    '';
+  const participantB =
+    pickInternalString(r, [
+      'participant_b',
+      'participantB',
+      'participantBId',
+      'agentBId',
+      'agent_b_id',
+    ]) ||
+    peerAgentId;
+  const id = pickInternalString(r, ['id', 'conversationId', 'conversation_id']);
+  const agentA = agentARecord ? toInternalAgent(agentARecord, participantA) : undefined;
+  const agentB = agentBRecord ? toInternalAgent(agentBRecord, participantB) : undefined;
+  const flatOtherName = pickInternalString(r, [
+    'peerAgentName',
+    'peer_agent_name',
+    'otherAgentName',
+    'other_agent_name',
+  ]);
+  const otherParticipant = otherRecord
+    ? toInternalAgent(otherRecord, peerAgentId || participantB)
+    : flatOtherName
+      ? toInternalAgent({ id: peerAgentId || participantB, name: flatOtherName }, peerAgentId || participantB)
+    : currentAgentId && participantA === currentAgentId && agentB
+      ? agentB
+      : currentAgentId && participantB === currentAgentId && agentA
+        ? agentA
+        : undefined;
+
+  return {
+    id,
+    created_at: pickInternalString(r, ['created_at', 'createdAt']),
+    updated_at: pickInternalString(r, ['updated_at', 'updatedAt']),
+    participant_a: participantA,
+    participant_b: participantB,
+    last_message:
+      pickInternalString(r, ['last_message', 'lastMessage', 'lastMessageText']) || null,
+    last_message_at:
+      pickInternalString(r, ['last_message_at', 'lastMessageAt']) || null,
+    otherParticipant,
+    agentA,
+    agentB,
+    unreadCount: Number(r.unreadCount ?? r.unread_count ?? 0),
+  };
+}
+
+function toInternalMessage(raw: unknown, conversationId: string): InternalChatMessage {
+  const r = asRecord(raw);
+  return {
+    id: pickInternalString(r, ['id', 'messageId', 'message_id']),
+    conversation_id:
+      pickInternalString(r, ['conversation_id', 'conversationId']) || conversationId,
+    sender_id: pickInternalString(r, ['sender_id', 'senderId', 'agentId', 'userId']),
+    content: pickInternalString(r, ['content', 'text', 'message', 'body']),
+    created_at:
+      pickInternalString(r, ['created_at', 'createdAt', 'sentAt']) ||
+      new Date().toISOString(),
+    is_read: Boolean(r.is_read ?? r.isRead ?? r.read),
+  };
+}
+
+function collectInternalArray(raw: unknown, keys: readonly string[]): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  const body = asRecord(raw);
+  for (const key of keys) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+  }
+  if (Array.isArray(body.data)) return body.data;
+  const data = asRecord(body.data);
+  for (const key of keys) {
+    const value = data[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function extractInternalConversationId(raw: unknown): string {
+  const body = asRecord(raw);
+  const direct = pickInternalString(body, ['id', 'conversationId', 'conversation_id']);
+  if (direct) return direct;
+  for (const key of ['conversation', 'data', 'result'] as const) {
+    const nested = pickInternalString(asRecord(body[key]), [
+      'id',
+      'conversationId',
+      'conversation_id',
+    ]);
+    if (nested) return nested;
+  }
+  return '';
+}
+
+type InternalChatSupabaseResult = {
+  error: { message?: string } | null;
+};
+
+type InternalChatSupabaseQuery = PromiseLike<InternalChatSupabaseResult> & {
+  update(values: unknown): InternalChatSupabaseQuery;
+  eq(column: string, value: unknown): InternalChatSupabaseQuery;
+  neq(column: string, value: unknown): InternalChatSupabaseQuery;
+};
+
+function internalMessagesTable(): InternalChatSupabaseQuery {
+  return (supabase as unknown as { from(table: string): InternalChatSupabaseQuery }).from(
+    'agent_messages',
+  );
+}
+
+async function readAgentChatJson(res: Response): Promise<unknown> {
+  const text = await res.text();
+  return text.trim() ? (JSON.parse(text) as unknown) : null;
+}
+
 export async function fetchInternalConversations(currentAgentId: string): Promise<InternalChatConversation[]> {
-  const { data, error } = await ((supabase as any)
-    .from('agent_conversations'))
-    .select(`
-      *,
-      agent_a:participant_a(id, name, extension, status),
-      agent_b:participant_b(id, name, extension, status)
-    `)
-    .or(`participant_a.eq.${currentAgentId},participant_b.eq.${currentAgentId}`)
-    .order('updated_at', { ascending: false });
-
-  if (error) throw error;
-  if (!data || data.length === 0) return [];
-
-  // Fetch unread counts for these conversations
-  const { data: unreadData, error: unreadError } = await ((supabase as any)
-    .from('agent_messages'))
-    .select('conversation_id')
-    .eq('is_read', false)
-    .neq('sender_id', currentAgentId)
-    .in('conversation_id', data.map(c => c.id));
-
-  const unreadMap = (unreadData || []).reduce((acc: any, msg: any) => {
-    acc[msg.conversation_id] = (acc[msg.conversation_id] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
-
-  return data.map(conv => {
-    const isParticipantA = conv.participant_a === currentAgentId;
-    const otherAgent = isParticipantA ? conv.agent_b : conv.agent_a;
-    
-    return {
-      ...conv,
-      otherParticipant: otherAgent as unknown as Agent,
-      unreadCount: unreadMap[conv.id] || 0
-    };
-  });
+  const res = await authorizedFetchAgentChat('/conversations');
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `fetchInternalConversations failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
+    );
+  }
+  const rows = collectInternalArray(await res.json(), [
+    'conversations',
+    'items',
+    'results',
+    'rows',
+  ]);
+  return rows.map((row) => toInternalConversation(row, currentAgentId));
 }
 
 /**
  * Fetch all conversations for Super Admin
  */
 export async function fetchAllInternalConversations(): Promise<InternalChatConversation[]> {
-  const { data, error } = await ((supabase as any)
-    .from('agent_conversations'))
-    .select(`
-      *,
-      agent_a:participant_a(id, name, extension, status),
-      agent_b:participant_b(id, name, extension, status)
-    `)
-    .order('updated_at', { ascending: false });
-
-  if (error) throw error;
-  if (!data || data.length === 0) return [];
-
-  // Fetch all unread messages for these conversations
-  const { data: unreadData, error: unreadError } = await ((supabase as any)
-    .from('agent_messages'))
-    .select('conversation_id')
-    .eq('is_read', false)
-    .in('conversation_id', data.map(c => c.id));
-
-  const unreadMap = (unreadData || []).reduce((acc: any, msg: any) => {
-    acc[msg.conversation_id] = (acc[msg.conversation_id] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
-
-  return data.map(conv => ({
-    ...conv,
-    agentA: conv.agent_a as unknown as Agent,
-    agentB: conv.agent_b as unknown as Agent,
-    unreadCount: unreadMap[conv.id] || 0
-  }));
+  const res = await authorizedFetchAgentChat('/conversations');
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `fetchAllInternalConversations failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
+    );
+  }
+  const rows = collectInternalArray(await res.json(), [
+    'conversations',
+    'items',
+    'results',
+    'rows',
+  ]);
+  return rows.map((row) => toInternalConversation(row));
 }
 
 export async function fetchInternalMessages(conversationId: string): Promise<InternalChatMessage[]> {
-  const { data, error } = await ((supabase as any)
-    .from('agent_messages'))
-    .select('*')
-    .eq('conversation_id', conversationId)
-    .order('created_at', { ascending: true });
-
-  if (error) throw error;
-  return (data || []) as InternalChatMessage[];
+  const res = await authorizedFetchAgentChat(
+    `/conversations/${encodeURIComponent(conversationId)}/messages`,
+  );
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `fetchInternalMessages failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
+    );
+  }
+  const rows = collectInternalArray(await res.json(), [
+    'messages',
+    'items',
+    'results',
+    'rows',
+  ]);
+  return rows.map((row) => toInternalMessage(row, conversationId));
 }
 
 export async function fetchInternalUnreadCount(agentId: string): Promise<number> {
-  // First get conversation IDs
-  const { data: convs, error: convError } = await ((supabase as any)
-    .from('agent_conversations'))
-    .select('id')
-    .or(`participant_a.eq.${agentId},participant_b.eq.${agentId}`);
-
-  if (convError || !convs || convs.length === 0) return 0;
-  const ids = (convs as any[]).map((c: any) => c.id);
-
-  const { count, error } = await ((supabase as any)
-    .from('agent_messages'))
-    .select('*', { count: 'exact', head: true })
-    .eq('is_read', false)
-    .neq('sender_id', agentId)
-    .in('conversation_id', ids);
-
-  if (error) return 0;
-  return count || 0;
+  const conversations = await fetchInternalConversations(agentId).catch(
+    (): InternalChatConversation[] => [],
+  );
+  return conversations.reduce<number>((sum, c) => sum + (c.unreadCount ?? 0), 0);
 }
 
 /**
  * Fetch a global count of all unread internal messages for Super Admin oversight.
  */
 export async function fetchGlobalInternalUnreadCount(): Promise<number> {
-  const { count, error } = await ((supabase as any)
-    .from('agent_messages'))
-    .select('*', { count: 'exact', head: true })
-    .eq('is_read', false);
-
-  if (error) return 0;
-  return count || 0;
+  const conversations = await fetchAllInternalConversations().catch(
+    (): InternalChatConversation[] => [],
+  );
+  return conversations.reduce<number>((sum, c) => sum + (c.unreadCount ?? 0), 0);
 }
 
 export async function markInternalMessagesAsRead(conversationId: string, readerId: string): Promise<void> {
-  const { error } = await ((supabase as any)
-    .from('agent_messages'))
+  const { error } = await internalMessagesTable()
     .update({ is_read: true })
     .eq('conversation_id', conversationId)
     .neq('sender_id', readerId)
@@ -927,8 +1080,7 @@ export async function markInternalMessagesAsRead(conversationId: string, readerI
 
 /** Mark every unread message in a conversation read (e.g. super-admin oversight with no agent row). */
 export async function markInternalConversationAllRead(conversationId: string): Promise<void> {
-  const { error } = await ((supabase as any)
-    .from('agent_messages'))
+  const { error } = await internalMessagesTable()
     .update({ is_read: true })
     .eq('conversation_id', conversationId)
     .eq('is_read', false);
@@ -939,44 +1091,35 @@ export async function markInternalConversationAllRead(conversationId: string): P
 }
 
 export async function sendInternalMessage(conversationId: string, senderId: string, content: string): Promise<void> {
-  const { error } = await ((supabase as any)
-    .from('agent_messages'))
-    .insert({
-      conversation_id: conversationId,
-      sender_id: senderId,
-      content
-    });
-
-  if (error) throw error;
+  void senderId;
+  const res = await authorizedFetchAgentChat(
+    `/conversations/${encodeURIComponent(conversationId)}/messages`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ content }),
+    },
+  );
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`sendInternalMessage failed: ${res.status}${detail ? ` - ${detail}` : ''}`);
+  }
 }
 
 export async function getOrCreateInternalConversation(agentIdA: string, agentIdB: string): Promise<string> {
-  // Ensure consistent order for unique constraint
-  const [p1, p2] = agentIdA < agentIdB ? [agentIdA, agentIdB] : [agentIdB, agentIdA];
-
-  // Try to find existing
-  const { data: existing, error: fetchError } = await ((supabase as any)
-    .from('agent_conversations'))
-    .select('id')
-    .eq('participant_a', p1)
-    .eq('participant_b', p2)
-    .maybeSingle();
-
-  if (fetchError) throw fetchError;
-  if (existing) return (existing as any).id;
-
-  // Create new
-  const { data: created, error: createError } = await ((supabase as any)
-    .from('agent_conversations'))
-    .insert({
-      participant_a: p1,
-      participant_b: p2
-    })
-    .select('id')
-    .single();
-
-  if (createError) throw createError;
-  return created.id;
+  void agentIdA;
+  const res = await authorizedFetchAgentChat('/conversations', {
+    method: 'POST',
+    body: JSON.stringify({ peerAgentId: agentIdB }),
+  });
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `getOrCreateInternalConversation failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
+    );
+  }
+  const id = extractInternalConversationId(await readAgentChatJson(res));
+  if (!id) throw new Error('Conversation API did not return a conversation id.');
+  return id;
 }
 
 export function subscribeToInternalMessages(conversationId: string, onMessage: (message: InternalChatMessage) => void) {

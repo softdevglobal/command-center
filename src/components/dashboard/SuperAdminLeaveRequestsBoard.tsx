@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dialog";
 import {
   fetchAllLeaveRequests,
+  fetchLeaveRequest,
   formatLeaveDateRange,
   formatLeaveDurationLabel,
   getLeaveRequestAttachmentSignedUrl,
@@ -170,6 +171,20 @@ export function SuperAdminLeaveRequestsBoard({ agents, tenants }: SuperAdminLeav
     setReviewDecision(decision);
     setReviewComment("");
     setReviewOpen(true);
+    void fetchLeaveRequest(row.id)
+      .then((fresh) => {
+        setRows((prev) => [...prev.filter((r) => r.id !== fresh.id), fresh]);
+        if (fresh.status !== "pending") {
+          setReviewOpen(false);
+          setReviewRow(null);
+          setError("This leave request has already been reviewed.");
+          return;
+        }
+        setReviewRow((current) => (current?.id === row.id ? fresh : current));
+      })
+      .catch(() => {
+        /* Keep the selected row if the detail endpoint is temporarily unavailable. */
+      });
   };
 
   const confirmReview = async () => {

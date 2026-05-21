@@ -25,7 +25,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { updateDashboardAgent, deleteDashboardAgent } from '@/services/dashboardApi';
+import { updateAgent, deleteAgent } from '@/services/agentApis';
 import { fetchBmsWorkshopOptions } from '@/services/didMappingsApi';
 import { Pencil, Trash2, MessageSquare } from 'lucide-react';
 import { useDashboard } from '@/context/DashboardDataContext';
@@ -112,7 +112,7 @@ export function AgentsTab({ agents, queues, tenants, permissions, now, onRefresh
     setSaving(true);
     setSaveError(null);
     try {
-      await updateDashboardAgent(editingAgent.id, {
+      await updateAgent(editingAgent.id, {
         name,
         extension: formExtension.trim(),
         email: formEmail.trim(),
@@ -152,7 +152,7 @@ export function AgentsTab({ agents, queues, tenants, permissions, now, onRefresh
     setDeleting(true);
     setDeleteError(null);
     try {
-      await deleteDashboardAgent(deletingAgent.id);
+      await deleteAgent(deletingAgent.id);
       setDeleteOpen(false);
       setDeletingAgent(null);
       onRefresh();

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { AgentShiftSchedule, UserSession } from "@/services/types";
+import { Agent, AgentShiftSchedule, UserSession } from "@/services/types";
 import { fetchMyShiftSchedule } from "@/services/attendanceApi";
 import {
   Card,
@@ -13,7 +13,7 @@ import { toast } from "@/hooks/use-toast";
 
 interface AgentShiftScheduleViewProps {
   session: UserSession;
-  agents: any[];
+  agents: Agent[];
 }
 
 const DAYS = [

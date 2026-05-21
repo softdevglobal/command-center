@@ -19,6 +19,10 @@ import {
   type SalesSuburbWorkshopContactRow 
 } from '@/services/salesWorkspaceApi';
 import {
+  fetchAgentsPerformance,
+  type AgentPerformanceRow,
+} from '@/services/agentApis';
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -37,6 +41,7 @@ interface AgentPerformanceTabProps {
 
 export function AgentPerformanceTab({ agents, calls, tenantId }: AgentPerformanceTabProps) {
   const [workshopContacts, setWorkshopContacts] = useState<SalesSuburbWorkshopContactRow[]>([]);
+  const [apiPerformance, setApiPerformance] = useState<AgentPerformanceRow[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -47,32 +52,64 @@ export function AgentPerformanceTab({ agents, calls, tenantId }: AgentPerformanc
       .catch(() => {});
   }, [tenantId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetchAgentsPerformance({ tenantId: tenantId ?? null })
+      .then((rows) => {
+        if (!cancelled) setApiPerformance(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setApiPerformance([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId]);
+
+  const apiPerformanceById = useMemo(
+    () => new Map(apiPerformance.map((row) => [row.agentId, row] as const)),
+    [apiPerformance],
+  );
+
   const allPerformanceData = useMemo(() => {
     // Only include Command Center agents (no BMS link)
     const ccAgents = agents.filter(a => !String(a.bmsOwnerUid ?? '').trim());
 
     return ccAgents.map((agent) => {
+      const apiRow = apiPerformanceById.get(agent.id);
+
       const agentCalls = calls.filter((c) => c.agentId === agent.id);
-      const answeredCalls = agentCalls.filter((c) => c.result === 'answered');
-      
-      const totalDuration = answeredCalls.reduce((acc, call) => acc + (call.durationSeconds || 0), 0);
-      const avgDuration = answeredCalls.length > 0 ? Math.round(totalDuration / answeredCalls.length) : 0;
-      
-      // Calculate answer rate
-      const answerRate = agentCalls.length > 0 
-        ? Math.round((answeredCalls.length / agentCalls.length) * 100) 
+      const answeredCallsLocal = agentCalls.filter((c) => c.result === 'answered');
+      const localTotalDuration = answeredCallsLocal.reduce(
+        (acc, call) => acc + (call.durationSeconds || 0),
+        0,
+      );
+      const localAvgDuration = answeredCallsLocal.length > 0
+        ? Math.round(localTotalDuration / answeredCallsLocal.length)
+        : 0;
+      const localAnswerRate = agentCalls.length > 0
+        ? Math.round((answeredCallsLocal.length / agentCalls.length) * 100)
         : 0;
 
-      // Call List (Workshops) Performance
+      // Prefer API-aggregated metrics; fall back to live data when missing.
+      const totalCalls = apiRow?.totalCalls ?? agentCalls.length;
+      const answeredCalls = apiRow?.answeredCalls ?? answeredCallsLocal.length;
+      const totalDuration = apiRow?.totalDurationSeconds ?? localTotalDuration;
+      const avgDuration = apiRow?.avgDurationSeconds ?? localAvgDuration;
+      const answerRate = apiRow?.answerRate ?? localAnswerRate;
+
+      // Call List (Workshops) Performance — prefer API metrics if present.
       const agentWorkshopContacts = workshopContacts.filter(c => c.agent_id === agent.id);
-      const listAttempted = agentWorkshopContacts.length;
-      const listConfirmed = agentWorkshopContacts.filter(c => c.call_status === 'confirmed').length;
-      const listRejected = agentWorkshopContacts.filter(c => c.call_status === 'rejected').length;
+      const listAttempted = apiRow?.listAttempted ?? agentWorkshopContacts.length;
+      const listConfirmed = apiRow?.listConfirmed
+        ?? agentWorkshopContacts.filter(c => c.call_status === 'confirmed').length;
+      const listRejected = apiRow?.listRejected
+        ?? agentWorkshopContacts.filter(c => c.call_status === 'rejected').length;
 
       return {
         ...agent,
-        totalCalls: agentCalls.length,
-        answeredCalls: answeredCalls.length,
+        totalCalls,
+        answeredCalls,
         totalDuration,
         avgDuration,
         answerRate,
@@ -84,7 +121,7 @@ export function AgentPerformanceTab({ agents, calls, tenantId }: AgentPerformanc
       if (b.answeredCalls !== a.answeredCalls) return b.answeredCalls - a.answeredCalls;
       return b.listAttempted - a.listAttempted;
     });
-  }, [agents, calls, workshopContacts]);
+  }, [agents, calls, workshopContacts, apiPerformanceById]);
 
   const filteredPerformanceData = useMemo(() => {
     return allPerformanceData.filter(item => {

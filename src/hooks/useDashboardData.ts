@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import {
   fetchTenants,
-  fetchAgents,
   fetchQueues,
   fetchCalls,
   fetchSummary,
@@ -12,6 +11,7 @@ import {
   subscribeToCalls,
   subscribeToIncomingCalls,
 } from "@/services/dashboardApi";
+import { fetchAgentsList } from "@/services/agentApis";
 import { DASHBOARD_DISMISS_INCOMING_CALLER_EVENT } from "@/services/linkusCallLog";
 import { fetchAgentOnboarding } from "@/services/agentOnboardingApi";
 import { isValidCallerNumber } from "@/utils/formatters";
@@ -85,7 +85,7 @@ const LINKUS_DISMISS_DEDUP_MS = 3500;
 /**
  * Tab→query gating lives in `@/lib/dashboardQueryLimits` (shared with hover prefetch).
  *
- * - `fetchTenants` + `fetchAgents` stay on for the whole session — `DashboardPage`
+ * - `fetchTenants` + `fetchAgentsList` stay on for the whole session — `DashboardPage`
  *   resolves chat tenant, workshop owner UID, leave badges, and sidebar `isCCAgent`
  *   from these lists even when the heavy tabs are closed.
  * - Queues / calls / SIP / onboarding / derived summary only run when a tab that
@@ -143,7 +143,7 @@ export function useDashboardData({
 
   const { data: agents = [], error: agentsErr, isPending: isPendingAgents } = useQuery({
     queryKey: ["agents", effectiveTenant],
-    queryFn: () => fetchAgents(effectiveTenant),
+    queryFn: () => fetchAgentsList({ tenantId: effectiveTenant }),
     enabled: !!session,
     staleTime: 10_000,
     refetchInterval: refreshInterval,
@@ -174,12 +174,27 @@ export function useDashboardData({
   });
 
   // Summary depends on agents, queues, and calls. 
-  // We compute it using the already fetched data to avoid extra network requests.
+  // The overview API supplies the call KPIs; live local data fills any fields
+  // the API does not return (active calls, waiting calls, available agents).
   const { data: summary = null, error: summaryErr } = useQuery({
     queryKey: ["summary", effectiveTenant, callDate, callsFetchLimit],
-    queryFn: () => fetchSummary(effectiveTenant, { agents, queues, calls }),
-    enabled: !!session && needsSummary && agents.length > 0,
+    queryFn: () => {
+      const { startIso, endIso } = attendanceDayRangeAustralianYmd(callDate);
+      return fetchSummary(
+        effectiveTenant,
+        { agents, queues, calls },
+        startIso,
+        endIso,
+      );
+    },
+    enabled:
+      !!session &&
+      needsSummary &&
+      !isPendingAgents &&
+      !isPendingQueues &&
+      !isPendingCalls,
     staleTime: 5_000,
+    refetchInterval: refreshInterval,
   });
 
   const { data: sipLines = [], error: sipLinesErr } = useQuery({

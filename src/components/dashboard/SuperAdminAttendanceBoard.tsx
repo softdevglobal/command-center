@@ -61,7 +61,7 @@ function displayNameForUser(
   events: AgentAttendanceEventRow[],
   agents: Agent[],
 ): string {
-  const agentRow = agents.find((a) => a.userId === userId);
+  const agentRow = agents.find((a) => a.id === userId || a.userId === userId);
   if (agentRow?.name) return agentRow.name;
   for (let i = events.length - 1; i >= 0; i--) {
     const n = events[i].agent_display_name;
@@ -180,6 +180,7 @@ export function SuperAdminAttendanceBoard({
   const commandCentreUserIds = useMemo(() => {
     const s = new Set<string>();
     for (const a of commandCentreAgents) {
+      s.add(a.id);
       if (a.userId && isSupabaseAuthUserId(a.userId)) s.add(a.userId);
     }
     return s;
@@ -267,7 +268,7 @@ export function SuperAdminAttendanceBoard({
           const { status } = deriveAttendanceShiftStatus(sorted);
           const { workedMs, breakMs } = computeWorkedAndBreakMs(sorted, segmentNowMs);
           const last = sorted[sorted.length - 1];
-          const agentRow = commandCentreAgents.find((a) => a.userId === userId);
+          const agentRow = commandCentreAgents.find((a) => a.id === userId || a.userId === userId);
           const tenantId =
             agentRow?.tenantId ||
             last?.tenant_id ||
@@ -325,7 +326,7 @@ export function SuperAdminAttendanceBoard({
 
         const daysPresent = countDaysPresent(evs);
         const last = sorted[sorted.length - 1];
-        const agentRow = commandCentreAgents.find((a) => a.userId === userId);
+        const agentRow = commandCentreAgents.find((a) => a.id === userId || a.userId === userId);
         const tenantId =
           agentRow?.tenantId ||
           last?.tenant_id ||

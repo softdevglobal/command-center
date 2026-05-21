@@ -35,18 +35,77 @@ const DAYS = [
   "sunday",
 ] as const;
 
-function parseShift(val: string | null) {
-  if (!val || val.toUpperCase() === "OFF")
-    return { isOff: true, start: "09:00", end: "17:00" };
-  const parts = val.split(" - ");
-  if (parts.length === 2) {
-    return { isOff: false, start: parts[0], end: parts[1] };
-  }
-  return { isOff: true, start: "09:00", end: "17:00" };
+const DEFAULT_SHIFT_START = "09:00";
+const DEFAULT_SHIFT_END = "18:00";
+
+function blankSchedule(agentId: string): AgentShiftSchedule {
+  return {
+    id: "",
+    agentId,
+    monday: null,
+    tuesday: null,
+    wednesday: null,
+    thursday: null,
+    friday: null,
+    saturday: null,
+    sunday: null,
+  };
 }
 
-function formatShift(isOff: boolean, start: string, end: string) {
-  return isOff ? "OFF" : `${start} - ${end}`;
+function parseTimeToInput(raw: string | null | undefined, fallback: string): string {
+  const value = raw?.trim();
+  if (!value) return fallback;
+
+  const twentyFourHour = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (twentyFourHour) {
+    const hour = Number(twentyFourHour[1]);
+    const minute = Number(twentyFourHour[2]);
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    }
+  }
+
+  const twelveHour = value.match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (twelveHour) {
+    const baseHour = Number(twelveHour[1]);
+    const minute = Number(twelveHour[2] ?? "0");
+    if (baseHour >= 1 && baseHour <= 12 && minute >= 0 && minute <= 59) {
+      const period = twelveHour[3].toUpperCase();
+      const hour = period === "PM" ? (baseHour % 12) + 12 : baseHour % 12;
+      return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+    }
+  }
+
+  return fallback;
+}
+
+function formatTimeForApi(input: string): string {
+  const [hourRaw, minuteRaw] = input.split(":");
+  const hour = Number(hourRaw);
+  const minute = Number(minuteRaw);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return input;
+
+  const period = hour >= 12 ? "PM" : "AM";
+  const twelveHour = hour % 12 || 12;
+  return `${twelveHour}:${String(minute).padStart(2, "0")} ${period}`;
+}
+
+function parseShift(val: string | null) {
+  if (!val || val.toUpperCase() === "OFF")
+    return { isOff: true, start: DEFAULT_SHIFT_START, end: DEFAULT_SHIFT_END };
+  const parts = val.split(/\s+-\s+/);
+  if (parts.length === 2) {
+    return {
+      isOff: false,
+      start: parseTimeToInput(parts[0], DEFAULT_SHIFT_START),
+      end: parseTimeToInput(parts[1], DEFAULT_SHIFT_END),
+    };
+  }
+  return { isOff: true, start: DEFAULT_SHIFT_START, end: DEFAULT_SHIFT_END };
+}
+
+function formatShift(isOff: boolean, start: string, end: string): string | null {
+  return isOff ? null : `${formatTimeForApi(start)} - ${formatTimeForApi(end)}`;
 }
 
 function ShiftCell({
@@ -54,7 +113,7 @@ function ShiftCell({
   onChange,
 }: {
   value: string | null;
-  onChange: (newVal: string) => void;
+  onChange: (newVal: string | null) => void;
 }) {
   const { isOff, start, end } = parseShift(value);
 
@@ -76,7 +135,7 @@ function ShiftCell({
           ) : (
             <span className="flex items-center gap-1.5 truncate">
               <Clock className="h-3 w-3 text-emerald-600" />
-              {start}–{end}
+              {formatTimeForApi(start)}–{formatTimeForApi(end)}
             </span>
           )}
         </Button>
@@ -117,7 +176,7 @@ function ShiftCell({
           
           <div className="pt-2">
             <p className="text-[10px] text-muted-foreground italic">
-              Changes are saved locally. Click the save icon in the row to sync to database.
+              Changes are saved locally. Click the save icon in the row to sync.
             </p>
           </div>
         </div>
@@ -155,11 +214,11 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
     load();
   }, []);
 
-  const handleUpdate = (agentId: string, day: (typeof DAYS)[number], value: string) => {
+  const handleUpdate = (agentId: string, day: (typeof DAYS)[number], value: string | null) => {
     setSchedules((prev) => ({
       ...prev,
       [agentId]: {
-        ...(prev[agentId] || { agentId, id: "" }),
+        ...(prev[agentId] || blankSchedule(agentId)),
         [day]: value,
       } as AgentShiftSchedule,
     }));
@@ -168,7 +227,8 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
   const handleSave = async (agentId: string) => {
     setSavingId(agentId);
     try {
-      await upsertAgentShiftSchedule(schedules[agentId]);
+      const saved = await upsertAgentShiftSchedule(schedules[agentId] ?? blankSchedule(agentId));
+      setSchedules((prev) => ({ ...prev, [agentId]: saved }));
       toast({
         title: "Success",
         description: "Shift schedule saved",
@@ -231,7 +291,7 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
                 {DAYS.map((day) => (
                   <TableCell key={day}>
                     <ShiftCell
-                      value={schedules[agent.id]?.[day] || "OFF"}
+                      value={schedules[agent.id]?.[day] ?? null}
                       onChange={(newVal) => handleUpdate(agent.id, day, newVal)}
                     />
                   </TableCell>

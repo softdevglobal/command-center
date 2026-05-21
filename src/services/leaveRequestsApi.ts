@@ -1,4 +1,13 @@
 import { supabase } from "@/integrations/supabase/client";
+import {
+  AUDIT_ACTION_LEAVE_REQUEST_CREATE,
+  AUDIT_ACTION_LEAVE_REQUEST_UPDATE,
+  postSystemAuditLog,
+} from "./auditLogApi";
+
+const AGENT_LEAVE_REQUESTS_API_URL =
+  (import.meta.env.VITE_AGENT_LEAVE_REQUESTS_API_URL as string | undefined)?.trim() ||
+  "http://127.0.0.1:5050/api/agent-leave-requests";
 
 export const LEAVE_DURATION_TYPES = ["full_day", "half_day"] as const;
 export type LeaveDurationType = (typeof LEAVE_DURATION_TYPES)[number];
@@ -40,6 +49,153 @@ const ALLOWED_IMAGE_TYPES = new Set([
   "image/heif",
 ]);
 
+function asRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
+
+function pickString(row: Record<string, unknown>, keys: readonly string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function pickNullableString(row: Record<string, unknown>, keys: readonly string[]): string | null {
+  const text = pickString(row, keys);
+  return text || null;
+}
+
+function normalizeDate(raw: string): string {
+  if (!raw) return "";
+  return raw.includes("T") ? raw.slice(0, 10) : raw;
+}
+
+function normalizeDurationType(raw: string): LeaveDurationType {
+  return raw === "half_day" ? "half_day" : "full_day";
+}
+
+function normalizeLeaveStatus(raw: string): LeaveRequestStatus {
+  const status = raw.toLowerCase();
+  if (status === "approved" || status === "rejected") return status;
+  return "pending";
+}
+
+function normalizeLeaveRequest(raw: unknown): AgentLeaveRequestRow {
+  const row = asRecord(raw);
+  const startDate = normalizeDate(pickString(row, ["start_date", "startDate", "fromDate"]));
+  return {
+    id: pickString(row, ["id", "requestId", "request_id"]),
+    user_id: pickString(row, ["user_id", "userId", "agentId", "agent_id"]),
+    tenant_id: pickNullableString(row, ["tenant_id", "tenantId"]),
+    agent_display_name: pickNullableString(row, [
+      "agent_display_name",
+      "agentDisplayName",
+      "displayName",
+      "agentName",
+    ]),
+    start_date: startDate,
+    end_date: normalizeDate(pickString(row, ["end_date", "endDate", "toDate"])) || startDate,
+    duration_type: normalizeDurationType(pickString(row, ["duration_type", "durationType"])),
+    half_day_part: pickNullableString(row, ["half_day_part", "halfDayPart"]),
+    reason: pickNullableString(row, ["reason"]),
+    status: normalizeLeaveStatus(pickString(row, ["status", "decision"])),
+    reviewed_by: pickNullableString(row, ["reviewed_by", "reviewedBy"]),
+    reviewed_at: pickNullableString(row, ["reviewed_at", "reviewedAt"]),
+    review_comment: pickNullableString(row, ["review_comment", "reviewComment", "comment"]),
+    attachment_storage_path: pickNullableString(row, [
+      "attachment_storage_path",
+      "attachmentStoragePath",
+      "attachmentPath",
+      "photoStoragePath",
+    ]),
+    created_at: pickString(row, ["created_at", "createdAt"]) || new Date().toISOString(),
+  };
+}
+
+function collectRows(raw: unknown, keys: readonly string[]): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  const body = asRecord(raw);
+  for (const key of keys) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+  }
+  if (Array.isArray(body.data)) return body.data;
+  const data = asRecord(body.data);
+  for (const key of keys) {
+    const value = data[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function extractLeaveRequests(raw: unknown): AgentLeaveRequestRow[] {
+  return collectRows(raw, ["leaveRequests", "requests", "items", "results", "rows"])
+    .map(normalizeLeaveRequest)
+    .filter((row) => row.id && row.start_date && row.end_date);
+}
+
+function extractLeaveRequest(raw: unknown): AgentLeaveRequestRow {
+  const body = asRecord(raw);
+  const nested =
+    body.leaveRequest ??
+    body.request ??
+    body.item ??
+    body.row ??
+    body.data ??
+    raw;
+  const row = normalizeLeaveRequest(nested);
+  if (!row.id) throw new Error("Leave request API returned an invalid row.");
+  return row;
+}
+
+async function leaveRequestsBearerToken(): Promise<string> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session?.access_token) {
+    throw new Error("Sign in with your dashboard account to use leave requests.");
+  }
+  return session.access_token;
+}
+
+function leaveRequestsUrl(path: string): string {
+  const base = AGENT_LEAVE_REQUESTS_API_URL.replace(/\/+$/, "");
+  const suffix = path.trim() ? (path.startsWith("/") ? path : `/${path}`) : "";
+  return new URL(`${base}${suffix}`, window.location.origin).toString();
+}
+
+async function leaveRequestsFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const token = await leaveRequestsBearerToken();
+  const headers = new Headers(init.headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  headers.set("Authorization", `Bearer ${token}`);
+  return fetch(leaveRequestsUrl(path), { ...init, headers });
+}
+
+async function readHttpErrorDetail(res: Response): Promise<string> {
+  const text = await res.text();
+  if (!text.trim()) return "";
+  try {
+    const body = asRecord(JSON.parse(text) as unknown);
+    const detail = body.message ?? body.error ?? body.detail;
+    return typeof detail === "string" ? detail : text.slice(0, 400);
+  } catch {
+    return text.slice(0, 400);
+  }
+}
+
+async function readJsonBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  return text.trim() ? (JSON.parse(text) as unknown) : null;
+}
+
 function normalizeLeaveAttachmentExt(file: File): string {
   if (file.type && ALLOWED_IMAGE_TYPES.has(file.type)) {
     if (file.type === "image/jpeg") return "jpg";
@@ -63,9 +219,6 @@ function assertValidLeaveAttachment(file: File): void {
   }
   normalizeLeaveAttachmentExt(file);
 }
-
-const SELECT_FIELDS =
-  "id,user_id,tenant_id,agent_display_name,start_date,end_date,duration_type,half_day_part,reason,status,reviewed_by,reviewed_at,review_comment,attachment_storage_path,created_at";
 
 /** Signed URL for agents or super-admins (storage RLS allows both). */
 export async function getLeaveRequestAttachmentSignedUrl(
@@ -91,25 +244,34 @@ export function formatLeaveDateRange(row: Pick<AgentLeaveRequestRow, "start_date
 }
 
 export async function fetchMyLeaveRequests(userId: string): Promise<AgentLeaveRequestRow[]> {
-  const { data, error } = await supabase
-    .from("agent_leave_requests")
-    .select(SELECT_FIELDS)
-    .eq("user_id", userId)
-    .order("created_at", { ascending: false });
-
-  if (error) throw new Error(error.message);
-  return (data || []) as AgentLeaveRequestRow[];
+  const res = await leaveRequestsFetch("");
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`Leave requests API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
+  return extractLeaveRequests(await readJsonBody(res))
+    .filter((row) => !row.user_id || row.user_id === userId)
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 }
 
 export async function fetchAllLeaveRequests(): Promise<AgentLeaveRequestRow[]> {
-  const { data, error } = await supabase
-    .from("agent_leave_requests")
-    .select(SELECT_FIELDS)
-    .order("created_at", { ascending: false })
-    .limit(500);
+  const res = await leaveRequestsFetch("");
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`Leave requests API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
+  return extractLeaveRequests(await readJsonBody(res)).sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+}
 
-  if (error) throw new Error(error.message);
-  return (data || []) as AgentLeaveRequestRow[];
+export async function fetchLeaveRequest(requestId: string): Promise<AgentLeaveRequestRow> {
+  const res = await leaveRequestsFetch(`/${encodeURIComponent(requestId)}`);
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`Leave request API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
+  return extractLeaveRequest(await readJsonBody(res));
 }
 
 export async function insertLeaveRequest(opts: {
@@ -174,25 +336,45 @@ export async function insertLeaveRequest(opts: {
     if (upErr) throw new Error(upErr.message);
   }
 
-  const { error } = await supabase.from("agent_leave_requests").insert({
-    id: requestId,
-    user_id: opts.userId,
-    tenant_id: opts.tenantId,
-    agent_display_name: opts.displayName || null,
-    start_date: opts.startDate,
-    end_date: opts.endDate,
-    duration_type: opts.durationType,
-    half_day_part: opts.durationType === "full_day" ? null : opts.halfDayPart,
-    reason: opts.reason?.trim() || null,
-    attachment_storage_path,
+  const res = await leaveRequestsFetch("", {
+    method: "POST",
+    body: JSON.stringify({
+      id: requestId,
+      userId: opts.userId,
+      tenantId: opts.tenantId,
+      displayName: opts.displayName || null,
+      startDate: opts.startDate,
+      endDate: opts.endDate,
+      durationType: opts.durationType,
+      halfDayPart: opts.durationType === "full_day" ? null : opts.halfDayPart,
+      reason: opts.reason?.trim() || null,
+      attachmentStoragePath: attachment_storage_path,
+    }),
   });
 
-  if (error) {
+  if (!res.ok) {
     if (attachment_storage_path) {
       await supabase.storage.from(LEAVE_ATTACHMENTS_BUCKET).remove([attachment_storage_path]);
     }
-    throw new Error(error.message);
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`Leave request API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
   }
+
+  void postSystemAuditLog({
+    action: AUDIT_ACTION_LEAVE_REQUEST_CREATE,
+    resourceType: "agent_leave_request",
+    resourceId: requestId,
+    details: {
+      agentId: opts.userId,
+      tenantId: opts.tenantId,
+      displayName: opts.displayName,
+      startDate: opts.startDate,
+      endDate: opts.endDate,
+      durationType: opts.durationType,
+      halfDayPart: opts.durationType === "full_day" ? null : opts.halfDayPart,
+      hasAttachment: Boolean(attachment_storage_path),
+    },
+  }).catch(() => {});
 }
 
 export async function deleteMyPendingLeaveRequest(userId: string, requestId: string): Promise<void> {
@@ -224,23 +406,28 @@ export async function reviewLeaveRequest(opts: {
   decision: Exclude<LeaveRequestStatus, "pending">;
   reviewComment: string | null;
 }): Promise<void> {
-  const { data: authData, error: authErr } = await supabase.auth.getUser();
-  if (authErr || !authData.user) {
-    throw new Error("Sign in as super-admin to review leave.");
+  const res = await leaveRequestsFetch(`/${encodeURIComponent(opts.requestId)}/review`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      status: opts.decision,
+      reviewComment: opts.reviewComment?.trim() || null,
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(`Leave review API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
   }
 
-  const { error } = await supabase
-    .from("agent_leave_requests")
-    .update({
+  void postSystemAuditLog({
+    action: AUDIT_ACTION_LEAVE_REQUEST_UPDATE,
+    resourceType: "agent_leave_request",
+    resourceId: opts.requestId,
+    details: {
       status: opts.decision,
-      reviewed_by: authData.user.id,
-      reviewed_at: new Date().toISOString(),
-      review_comment: opts.reviewComment?.trim() || null,
-    })
-    .eq("id", opts.requestId)
-    .eq("status", "pending");
-
-  if (error) throw new Error(error.message);
+      hasReviewComment: Boolean(opts.reviewComment?.trim()),
+    },
+  }).catch(() => {});
 }
 
 export function subscribeToMyLeaveRequests(

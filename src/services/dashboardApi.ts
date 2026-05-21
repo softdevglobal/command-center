@@ -37,6 +37,25 @@ import type { UserSession } from "./types";
 
 export { ONBOARDING_STAGES };
 
+const CALLS_API_URL =
+  (import.meta.env.VITE_CALLS_API_URL as string | undefined)?.trim() ||
+  "http://127.0.0.1:5050/api/calls";
+
+const DASHBOARD_API_URL =
+  (import.meta.env.VITE_DASHBOARD_API_URL as string | undefined)?.trim() ||
+  deriveDashboardApiUrl(CALLS_API_URL);
+
+function deriveDashboardApiUrl(callsApiUrl: string): string {
+  const normalized = callsApiUrl.replace(/\/+$/, "");
+  if (normalized.endsWith("/api/calls")) {
+    return `${normalized.slice(0, -"/api/calls".length)}/api/dashboard`;
+  }
+  if (normalized.endsWith("/calls")) {
+    return `${normalized.slice(0, -"/calls".length)}/dashboard`;
+  }
+  return "http://127.0.0.1:5050/api/dashboard";
+}
+
 /* ─── Tenants ─── */
 
 export async function fetchTenants(): Promise<Tenant[]> {
@@ -62,8 +81,24 @@ export async function fetchTenants(): Promise<Tenant[]> {
 export async function fetchSummary(
   tenantId?: string | null,
   providedData?: { agents?: Agent[]; queues?: Queue[]; calls?: Call[] },
+  startDate?: string,
+  endDate?: string,
 ): Promise<DashboardSummary> {
-  // Use provided data if available to avoid redundant network requests
+  const localSummary = await computeDashboardSummary(tenantId, providedData);
+
+  try {
+    const apiSummary = await fetchDashboardMetrics(tenantId, startDate, endDate);
+    return mergeDashboardSummary(localSummary, apiSummary);
+  } catch {
+    return localSummary;
+  }
+}
+
+async function computeDashboardSummary(
+  tenantId?: string | null,
+  providedData?: { agents?: Agent[]; queues?: Queue[]; calls?: Call[] },
+): Promise<DashboardSummary> {
+  // Use provided data if available to avoid redundant network requests.
   const agents = providedData?.agents ?? await fetchAgents(tenantId);
   const queues = providedData?.queues ?? await fetchQueues(tenantId);
   const calls = providedData?.calls ?? await fetchCalls(tenantId);
@@ -104,6 +139,512 @@ export async function fetchSummary(
     avgHandleTime: avgHandle,
     slaPercent: sla,
   };
+}
+
+function mergeDashboardSummary(
+  localSummary: DashboardSummary,
+  apiSummary: Partial<DashboardSummary>,
+): DashboardSummary {
+  return {
+    ...localSummary,
+    ...dropUndefinedDashboardMetrics(apiSummary),
+  };
+}
+
+function dropUndefinedDashboardMetrics(
+  summary: Partial<DashboardSummary>,
+): Partial<DashboardSummary> {
+  return Object.fromEntries(
+    Object.entries(summary).filter(([, value]) => value !== undefined),
+  ) as Partial<DashboardSummary>;
+}
+
+function dashboardApiUrl(
+  path: string,
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): string {
+  const base = DASHBOARD_API_URL.replace(/\/+$/, "");
+  const suffix = path.trim() ? (path.startsWith("/") ? path : `/${path}`) : "";
+  const url = new URL(`${base}${suffix}`, window.location.origin);
+  if (tenantId) url.searchParams.set("tenantId", tenantId);
+  if (startDate) url.searchParams.set("startDate", startDate);
+  if (endDate) url.searchParams.set("endDate", endDate);
+  return url.toString();
+}
+
+async function getDashboardApiBearerToken(): Promise<string> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (session?.access_token) {
+    return session.access_token;
+  }
+
+  throw new Error("Sign in to load dashboard metrics.");
+}
+
+async function readDashboardApiErrorDetail(res: Response): Promise<string> {
+  const text = await res.text();
+  if (!text.trim()) return "";
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const body = asPlainRecord(parsed);
+    const detail = body.message ?? body.error ?? body.detail;
+    return typeof detail === "string" ? detail : text.slice(0, 400);
+  } catch {
+    return text.slice(0, 400);
+  }
+}
+
+async function readDashboardJsonBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  return text.trim() ? (JSON.parse(text) as unknown) : null;
+}
+
+async function fetchDashboardJson(
+  path: string,
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<unknown> {
+  const token = await getDashboardApiBearerToken();
+  const res = await fetch(dashboardApiUrl(path, tenantId, startDate, endDate), {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!res.ok) {
+    const detail = await readDashboardApiErrorDetail(res);
+    throw new Error(`Dashboard API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
+
+  return readDashboardJsonBody(res);
+}
+
+function pickOptionalMetricNumber(
+  raw: unknown,
+  keys: readonly string[],
+): number | undefined {
+  const direct = parseMetricNumber(raw);
+  if (direct !== undefined) return direct;
+
+  const candidates = metricRecordCandidates(raw);
+  for (const row of candidates) {
+    for (const key of keys) {
+      const value = row[key];
+      if (value == null || value === "") continue;
+      const n = parseMetricNumber(value);
+      if (n !== undefined) return n;
+    }
+  }
+
+  return undefined;
+}
+
+function parseMetricNumber(raw: unknown): number | undefined {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw !== "string") return undefined;
+  const text = raw.trim();
+  if (!text) return undefined;
+  const n = text.endsWith("%") ? Number.parseFloat(text) : Number(text);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function metricRecordCandidates(raw: unknown): Record<string, unknown>[] {
+  const body = asPlainRecord(raw);
+  const records = [
+    body,
+    asPlainRecord(body.data),
+    asPlainRecord(body.metrics),
+    asPlainRecord(body.summary),
+    asPlainRecord(body.overview),
+    asPlainRecord(body.result),
+  ];
+
+  const metricRows = collectMetricRows(raw);
+  if (metricRows.length > 0) {
+    records.push(metricRowsToRecord(metricRows));
+  }
+
+  return records.filter((row) => Object.keys(row).length > 0);
+}
+
+function collectMetricRows(raw: unknown): Record<string, unknown>[] {
+  if (Array.isArray(raw)) return raw.map(asPlainRecord);
+  const body = asPlainRecord(raw);
+  for (const key of ["metrics", "data", "items", "results", "rows"]) {
+    const value = body[key];
+    if (Array.isArray(value)) return value.map(asPlainRecord);
+  }
+  return [];
+}
+
+function metricRowsToRecord(rows: Record<string, unknown>[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const row of rows) {
+    const key = pickRecordString(row, ["key", "name", "metric", "id"]);
+    if (!key) continue;
+    const value =
+      pickOptionalMetricNumber(row, ["value", "count", "total", "rate", "seconds", "percent"]) ??
+      row.value;
+    out[key] = value;
+    out[normalizeMetricKey(key)] = value;
+  }
+  return out;
+}
+
+function normalizeMetricKey(key: string): string {
+  return key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function roundMetric(n: number): number {
+  return Math.round(n * 10) / 10;
+}
+
+function normalizePercentMetric(n: number | undefined): number | undefined {
+  if (n === undefined) return undefined;
+  return roundMetric(n > 0 && n <= 1 ? n * 100 : n);
+}
+
+function normalizeCountMetric(n: number | undefined): number | undefined {
+  return n === undefined ? undefined : Math.round(n);
+}
+
+function normalizeSecondsMetric(n: number | undefined): number | undefined {
+  return n === undefined ? undefined : Math.round(n);
+}
+
+function normalizeDashboardMetrics(raw: unknown): Partial<DashboardSummary> {
+  return {
+    activeCalls: normalizeCountMetric(
+      pickOptionalMetricNumber(raw, [
+        "activeCalls",
+        "active_calls",
+        "activeCallsCount",
+        "active_calls_count",
+        "liveCalls",
+        "live_calls",
+        "livecallscount",
+      ]),
+    ),
+    queuedCalls: normalizeCountMetric(
+      pickOptionalMetricNumber(raw, [
+        "queuedCalls",
+        "queued_calls",
+        "waitingCalls",
+        "waiting_calls",
+        "callsWaiting",
+        "calls_waiting",
+        "queuedcallscount",
+      ]),
+    ),
+    availableAgents: normalizeCountMetric(
+      pickOptionalMetricNumber(raw, [
+        "availableAgents",
+        "available_agents",
+        "availableAgentsCount",
+        "available_agents_count",
+        "availableagentscount",
+      ]),
+    ),
+    onlineAgents: normalizeCountMetric(
+      pickOptionalMetricNumber(raw, [
+        "onlineAgents",
+        "online_agents",
+        "onlineAgentsCount",
+        "online_agents_count",
+        "agentsOnline",
+        "agents_online",
+        "onlineagentscount",
+      ]),
+    ),
+    totalCallsToday: normalizeCountMetric(
+      pickOptionalMetricNumber(raw, [
+        "totalCallsToday",
+        "total_calls_today",
+        "todayCallsCount",
+        "today_calls_count",
+        "callsToday",
+        "calls_today",
+        "totalCalls",
+        "total_calls",
+        "todaycallscount",
+      ]),
+    ),
+    answerRate: normalizePercentMetric(
+      pickOptionalMetricNumber(raw, [
+        "answerRate",
+        "answer_rate",
+        "answeredRate",
+        "answered_rate",
+        "answerrate",
+      ]),
+    ),
+    abandonRate: normalizePercentMetric(
+      pickOptionalMetricNumber(raw, [
+        "abandonRate",
+        "abandon_rate",
+        "abondonRate",
+        "abondon_rate",
+        "abandonrate",
+        "abondonrate",
+      ]),
+    ),
+    avgHandleTime: normalizeSecondsMetric(
+      pickOptionalMetricNumber(raw, [
+        "avgHandleTime",
+        "avg_handle_time",
+        "avgHandle",
+        "avg_handle",
+        "averageHandleTime",
+        "average_handle_time",
+        "avgHandleSeconds",
+        "avg_handle_seconds",
+        "avghandle",
+      ]),
+    ),
+    slaPercent: normalizePercentMetric(
+      pickOptionalMetricNumber(raw, [
+        "slaPercent",
+        "sla_percent",
+        "sla",
+        "slaRate",
+        "sla_rate",
+        "serviceLevel",
+        "service_level",
+      ]),
+    ),
+  };
+}
+
+async function fetchDashboardMetricNumber(
+  path: string,
+  keys: readonly string[],
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  const raw = await fetchDashboardJson(path, tenantId, startDate, endDate);
+  const value = pickOptionalMetricNumber(raw, [
+    ...keys,
+    "value",
+    "count",
+    "total",
+    "rate",
+    "seconds",
+    "percent",
+  ]);
+  if (value === undefined) {
+    throw new Error(`Dashboard metric ${path} returned no numeric value.`);
+  }
+  return value;
+}
+
+export async function fetchOnlineAgentsCount(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  return normalizeCountMetric(
+    await fetchDashboardMetricNumber(
+      "/online-agents-count",
+      ["onlineAgents", "online_agents", "onlineAgentsCount", "online_agents_count"],
+      tenantId,
+      startDate,
+      endDate,
+    ),
+  ) ?? 0;
+}
+
+export async function fetchTodayCallsCount(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  return normalizeCountMetric(
+    await fetchDashboardMetricNumber(
+      "/today-calls-count",
+      ["totalCallsToday", "todayCallsCount", "today_calls_count", "callsToday"],
+      tenantId,
+      startDate,
+      endDate,
+    ),
+  ) ?? 0;
+}
+
+export async function fetchAnswerRate(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  return normalizePercentMetric(
+    await fetchDashboardMetricNumber(
+      "/answer-rate",
+      ["answerRate", "answer_rate", "answeredRate", "answered_rate"],
+      tenantId,
+      startDate,
+      endDate,
+    ),
+  ) ?? 0;
+}
+
+export async function fetchAbandonRate(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  return normalizePercentMetric(
+    await fetchDashboardMetricNumber(
+      "/abandon-rate",
+      ["abandonRate", "abandon_rate", "abondonRate", "abondon_rate"],
+      tenantId,
+      startDate,
+      endDate,
+    ),
+  ) ?? 0;
+}
+
+export async function fetchAbondonRate(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  return normalizePercentMetric(
+    await fetchDashboardMetricNumber(
+      "/abondon-rate",
+      ["abondonRate", "abondon_rate", "abandonRate", "abandon_rate"],
+      tenantId,
+      startDate,
+      endDate,
+    ),
+  ) ?? 0;
+}
+
+export async function fetchAverageHandleTime(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  return normalizeSecondsMetric(
+    await fetchDashboardMetricNumber(
+      "/avg-handle",
+      ["avgHandleTime", "avg_handle_time", "avgHandle", "avg_handle", "avgHandleSeconds"],
+      tenantId,
+      startDate,
+      endDate,
+    ),
+  ) ?? 0;
+}
+
+export async function fetchAvgHandle(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  return fetchAverageHandleTime(tenantId, startDate, endDate);
+}
+
+export async function fetchSlaPercent(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  return normalizePercentMetric(
+    await fetchDashboardMetricNumber(
+      "/sla",
+      ["slaPercent", "sla_percent", "sla", "slaRate", "serviceLevel"],
+      tenantId,
+      startDate,
+      endDate,
+    ),
+  ) ?? 0;
+}
+
+export async function fetchSla(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<number> {
+  return fetchSlaPercent(tenantId, startDate, endDate);
+}
+
+async function fetchDashboardMetricsFromIndividualEndpoints(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<Partial<DashboardSummary>> {
+  const entries = await Promise.allSettled([
+    fetchOnlineAgentsCount(tenantId, startDate, endDate),
+    fetchTodayCallsCount(tenantId, startDate, endDate),
+    fetchAnswerRate(tenantId, startDate, endDate),
+    fetchAbandonRate(tenantId, startDate, endDate).catch(() =>
+      fetchAbondonRate(tenantId, startDate, endDate),
+    ),
+    fetchAverageHandleTime(tenantId, startDate, endDate),
+    fetchSlaPercent(tenantId, startDate, endDate),
+  ]);
+
+  const [onlineAgents, totalCallsToday, answerRate, abandonRate, avgHandleTime, slaPercent] =
+    entries.map((entry) => (entry.status === "fulfilled" ? entry.value : undefined));
+
+  const summary = dropUndefinedDashboardMetrics({
+    onlineAgents,
+    totalCallsToday,
+    answerRate,
+    abandonRate,
+    avgHandleTime,
+    slaPercent,
+  });
+
+  if (Object.keys(summary).length === 0) {
+    throw new Error("Dashboard metric endpoints returned no usable values.");
+  }
+
+  return summary;
+}
+
+export async function fetchDashboardMetrics(
+  tenantId?: string | null,
+  startDate?: string,
+  endDate?: string,
+): Promise<Partial<DashboardSummary>> {
+  try {
+    const raw = await fetchDashboardJson("/metrics", tenantId, startDate, endDate);
+    const summary = dropUndefinedDashboardMetrics(normalizeDashboardMetrics(raw));
+    const requiredKeys: Array<keyof DashboardSummary> = [
+      "onlineAgents",
+      "totalCallsToday",
+      "answerRate",
+      "abandonRate",
+      "avgHandleTime",
+      "slaPercent",
+    ];
+    const hasAllRequired = requiredKeys.every((key) => summary[key] !== undefined);
+    if (hasAllRequired) return summary;
+
+    try {
+      const individual = await fetchDashboardMetricsFromIndividualEndpoints(
+        tenantId,
+        startDate,
+        endDate,
+      );
+      return { ...individual, ...summary };
+    } catch {
+      if (Object.keys(summary).length > 0) return summary;
+      throw new Error("Dashboard metrics API returned no usable values.");
+    }
+  } catch (metricsError) {
+    try {
+      return await fetchDashboardMetricsFromIndividualEndpoints(tenantId, startDate, endDate);
+    } catch {
+      throw metricsError;
+    }
+  }
 }
 
 /* ─── Queues ─── */
@@ -193,7 +734,7 @@ async function queryAgentsByPhoneNumber(
   // PostgREST `in` supports up to ~30 values
   const inValues = variants.slice(0, 30);
 
-  let query = supabase
+  let query = dynamicSupabase
     .from("agents")
     .select("*, tenants(name)")
     .in("phone_number", inValues)
@@ -334,12 +875,176 @@ export async function createSuperAdminAgent(opts: {
     queue_ids: [],
   };
 
-  const { error } = await supabase.from("agents").insert(payload);
+  const { error } = await dynamicSupabase.from("agents").insert(payload);
   if (error) throw new Error(error.message);
   return agentId;
 }
 
 /* ─── Calls ─── */
+
+type CallsApiRow = {
+  id: string;
+  tenant_id: string;
+  queue_id: string;
+  agent_id: string | null;
+  direction?: string | null;
+  caller_number: string;
+  caller_name: string | null;
+  dialed_number: string | null;
+  start_time: string;
+  answer_time: string | null;
+  end_time: string | null;
+  duration_seconds: number;
+  result: string;
+  recording_url: string | null;
+  transcript_status: string;
+  summary_status: string;
+  agent_name?: string | null;
+  queue_name?: string | null;
+  tenant_name?: string | null;
+};
+
+function asPlainRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
+
+function pickRecordString(
+  row: Record<string, unknown>,
+  keys: readonly string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = row[key];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return undefined;
+}
+
+function pickNullableRecordString(
+  row: Record<string, unknown>,
+  keys: readonly string[],
+): string | null {
+  return pickRecordString(row, keys) ?? null;
+}
+
+function pickRecordNumber(
+  row: Record<string, unknown>,
+  keys: readonly string[],
+  fallback = 0,
+): number {
+  for (const key of keys) {
+    const value = row[key];
+    if (value == null || value === "") continue;
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return fallback;
+}
+
+function extractCallsApiRows(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  const body = asPlainRecord(raw);
+  for (const key of ["calls", "data", "items", "results", "rows"]) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function normalizeCallsApiRow(raw: unknown): CallsApiRow {
+  const row = asPlainRecord(raw);
+  return {
+    id: pickRecordString(row, ["id", "callId", "call_id"]) ?? "",
+    tenant_id: pickRecordString(row, ["tenant_id", "tenantId"]) ?? "unknown",
+    queue_id: pickRecordString(row, ["queue_id", "queueId"]) ?? "unknown",
+    agent_id: pickNullableRecordString(row, ["agent_id", "agentId"]),
+    direction: pickNullableRecordString(row, ["direction"]),
+    caller_number: pickRecordString(row, ["caller_number", "callerNumber", "from"]) ?? "",
+    caller_name: pickNullableRecordString(row, ["caller_name", "callerName", "customerName"]),
+    dialed_number: pickNullableRecordString(row, ["dialed_number", "dialedNumber", "to", "did"]),
+    start_time:
+      pickRecordString(row, ["start_time", "startTime", "startedAt", "created_at", "createdAt"]) ??
+      new Date(0).toISOString(),
+    answer_time: pickNullableRecordString(row, ["answer_time", "answerTime", "answeredAt"]),
+    end_time: pickNullableRecordString(row, ["end_time", "endTime", "endedAt"]),
+    duration_seconds: pickRecordNumber(row, ["duration_seconds", "durationSeconds", "duration"], 0),
+    result: pickRecordString(row, ["result", "status", "callResult"]) ?? "missed",
+    recording_url: pickNullableRecordString(row, ["recording_url", "recordingUrl", "recording"]),
+    transcript_status: pickRecordString(row, ["transcript_status", "transcriptStatus"]) ?? "none",
+    summary_status: pickRecordString(row, ["summary_status", "summaryStatus"]) ?? "none",
+    agent_name: pickNullableRecordString(row, ["agent_name", "agentName"]),
+    queue_name: pickNullableRecordString(row, ["queue_name", "queueName"]),
+    tenant_name: pickNullableRecordString(row, ["tenant_name", "tenantName"]),
+  };
+}
+
+async function getCallsApiBearerToken(): Promise<string> {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  if (session?.access_token) {
+    return session.access_token;
+  }
+
+  throw new Error("Sign in to load calls.");
+}
+
+function callsApiUrl(
+  tenantId?: string | null,
+  limit: number = 200,
+  startDate?: string,
+  endDate?: string,
+): string {
+  const url = new URL(CALLS_API_URL, window.location.origin);
+  if (tenantId) url.searchParams.set("tenantId", tenantId);
+  url.searchParams.set("limit", String(Math.min(Math.max(limit, 1), 1000)));
+  if (startDate) url.searchParams.set("startDate", startDate);
+  if (endDate) url.searchParams.set("endDate", endDate);
+  return url.toString();
+}
+
+async function readCallsApiErrorDetail(res: Response): Promise<string> {
+  const text = await res.text();
+  if (!text.trim()) return "";
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const body = asPlainRecord(parsed);
+    const detail = body.message ?? body.error ?? body.detail;
+    return typeof detail === "string" ? detail : text.slice(0, 400);
+  } catch {
+    return text.slice(0, 400);
+  }
+}
+
+async function fetchCallsApiRows(
+  tenantId?: string | null,
+  limit: number = 200,
+  startDate?: string,
+  endDate?: string,
+): Promise<CallsApiRow[]> {
+  const token = await getCallsApiBearerToken();
+  const res = await fetch(callsApiUrl(tenantId, limit, startDate, endDate), {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!res.ok) {
+    const detail = await readCallsApiErrorDetail(res);
+    throw new Error(`Calls API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
+  }
+
+  return extractCallsApiRows(await res.json())
+    .map(normalizeCallsApiRow)
+    .filter((row) => row.id && row.caller_number)
+    .sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime())
+    .slice(0, Math.min(Math.max(limit, 1), 1000));
+}
 
 /** PBX row direction, or infer outbound when `direction` column is absent / default but CDR shape matches outbound. */
 function resolveCallDirectionFromRow(c: {
@@ -370,15 +1075,7 @@ export async function fetchCalls(
   startDate?: string,
   endDate?: string,
 ): Promise<Call[]> {
-  let query = supabase.from("calls").select("*");
-  if (tenantId) query = query.eq("tenant_id", tenantId);
-  if (startDate) query = query.gte("start_time", startDate);
-  if (endDate) query = query.lte("start_time", endDate);
-  const { data, error } = await query
-    .order("start_time", { ascending: false })
-    .limit(Math.min(Math.max(limit, 1), 1000));
-  if (error) throw new Error(error.message);
-  const rows = data || [];
+  const rows = await fetchCallsApiRows(tenantId, limit, startDate, endDate);
   if (rows.length === 0) return [];
 
   const dispositionByLinkusId = await fetchSoftphoneDispositionAgentMap(tenantId, rows.map(r => r.id));
@@ -520,6 +1217,9 @@ export async function fetchCalls(
     const effectiveAgentId = winnerAgentIds[i];
     const rowForDirection = { ...c, agent_id: effectiveAgentId };
     const dispName = winnerDispositions[i]?.agentName;
+    const apiAgentName = c.agent_name?.trim();
+    const apiQueueName = c.queue_name?.trim();
+    const apiTenantName = c.tenant_name?.trim();
     const dbAgentName = effectiveAgentId ? agentMap.get(effectiveAgentId) : null;
 
     return {
@@ -541,11 +1241,12 @@ export async function fetchCalls(
       summaryStatus: c.summary_status as "pending" | "ready" | "none",
       // Priority: 
       // 1. Captured Name from Softphone (Absolute authority)
-      // 2. Database Name from Agent Table (Fallback)
-      // 3. Status-based label
-      agentName: dispName || dbAgentName || (effectiveAgentId ? "Unknown agent" : "—"),
-      queueName: queueMap.get(c.queue_id) ?? c.queue_id,
-      tenantName: tenantMap.get(c.tenant_id) ?? c.tenant_id,
+      // 2. API-provided agent name
+      // 3. Database Name from Agent Table (Fallback)
+      // 4. Status-based label
+      agentName: dispName || apiAgentName || dbAgentName || (effectiveAgentId ? "Unknown agent" : "—"),
+      queueName: apiQueueName || queueMap.get(c.queue_id) || c.queue_id,
+      tenantName: apiTenantName || tenantMap.get(c.tenant_id) || c.tenant_id,
     };
   });
 }
@@ -611,13 +1312,27 @@ export async function fetchDIDMappings(): Promise<DIDMapping[]> {
 /* ─── Caller Context ─── */
 
 type UntypedSupabase = {
-  from: (table: string) => {
-    select: (...args: unknown[]) => any;
-    insert: (...args: unknown[]) => any;
-    update: (...args: unknown[]) => any;
-    delete: (...args: unknown[]) => any;
-    upsert: (...args: unknown[]) => any;
-  };
+  from: (table: string) => UntypedSupabaseQuery;
+};
+
+type UntypedSupabaseData = Array<Record<string, unknown>> & Record<string, unknown>;
+
+type UntypedSupabaseQuery = PromiseLike<{
+  data: UntypedSupabaseData | null;
+  error: { message?: string } | null;
+}> & {
+  select: (...args: unknown[]) => UntypedSupabaseQuery;
+  insert: (...args: unknown[]) => UntypedSupabaseQuery;
+  update: (...args: unknown[]) => UntypedSupabaseQuery;
+  delete: (...args: unknown[]) => UntypedSupabaseQuery;
+  upsert: (...args: unknown[]) => UntypedSupabaseQuery;
+  eq: (...args: unknown[]) => UntypedSupabaseQuery;
+  in: (...args: unknown[]) => UntypedSupabaseQuery;
+  or: (...args: unknown[]) => UntypedSupabaseQuery;
+  order: (...args: unknown[]) => UntypedSupabaseQuery;
+  limit: (...args: unknown[]) => UntypedSupabaseQuery;
+  single: (...args: unknown[]) => UntypedSupabaseQuery;
+  maybeSingle: (...args: unknown[]) => UntypedSupabaseQuery;
 };
 
 const dynamicSupabase = supabase as unknown as UntypedSupabase;
@@ -658,7 +1373,11 @@ async function fetchSoftphoneDispositionAgentMap(
   if (error || !data?.length) return new Map();
 
   const m = new Map<string, { agentId: string; agentName: string }>();
-  for (const row of data as any[]) {
+  for (const row of data as Array<{
+    linkus_call_id?: string;
+    agent_id?: string;
+    agent_name?: string | null;
+  }>) {
     if (row.linkus_call_id && row.agent_id) {
       m.set(row.linkus_call_id, {
         agentId: row.agent_id,
@@ -1022,29 +1741,45 @@ export async function fetchClients(
   return (data || []).map(mapOnboarding);
 }
 
-function mapOnboarding(row: any): TenantOnboarding {
-  const t = row.tenants || {};
+function mapOnboarding(row: Record<string, unknown>): TenantOnboarding {
+  const t =
+    row.tenants && typeof row.tenants === "object" && !Array.isArray(row.tenants)
+      ? (row.tenants as Record<string, unknown>)
+      : {};
   return {
-    id: row.id,
-    name: t.name || "",
-    industry: t.industry || "",
-    status: t.status || "active",
-    brandColor: t.brand_color || "#00d4f5",
-    didNumbers: t.did_numbers || [],
-    onboardingStage: row.onboarding_stage,
-    contactName: row.contact_name,
-    contactPhone: row.contact_phone,
-    contactEmail: row.contact_email,
-    createdBy: row.created_by,
-    createdAt: row.created_at,
-    notes: row.notes,
-    clientDetails: row.client_details || {},
-    businessRules: row.business_rules || {},
-    queueSetup: row.queue_setup || { queues: [] },
-    scriptKnowledgeBase: row.script_knowledge_base || {},
-    bookingRules: row.booking_rules || {},
-    testingGoLive: row.testing_go_live || {},
-    activityLog: row.activity_log || [],
+    id: String(row.id ?? ""),
+    name: String(t.name ?? ""),
+    industry: String(t.industry ?? ""),
+    status: t.status === "inactive" ? "inactive" : "active",
+    brandColor: String(t.brand_color ?? "#00d4f5"),
+    didNumbers: Array.isArray(t.did_numbers) ? t.did_numbers.map(String) : [],
+    onboardingStage: row.onboarding_stage as TenantOnboarding["onboardingStage"],
+    contactName: String(row.contact_name ?? ""),
+    contactPhone: String(row.contact_phone ?? ""),
+    contactEmail: String(row.contact_email ?? ""),
+    createdBy: String(row.created_by ?? ""),
+    createdAt: String(row.created_at ?? ""),
+    notes: String(row.notes ?? ""),
+    clientDetails:
+      (row.client_details as TenantOnboarding["clientDetails"] | undefined) ??
+      ({} as TenantOnboarding["clientDetails"]),
+    businessRules:
+      (row.business_rules as TenantOnboarding["businessRules"] | undefined) ??
+      ({} as TenantOnboarding["businessRules"]),
+    queueSetup:
+      (row.queue_setup as TenantOnboarding["queueSetup"] | undefined) ?? { queues: [] },
+    scriptKnowledgeBase:
+      (row.script_knowledge_base as TenantOnboarding["scriptKnowledgeBase"] | undefined) ??
+      ({} as TenantOnboarding["scriptKnowledgeBase"]),
+    bookingRules:
+      (row.booking_rules as TenantOnboarding["bookingRules"] | undefined) ??
+      ({} as TenantOnboarding["bookingRules"]),
+    testingGoLive:
+      (row.testing_go_live as TenantOnboarding["testingGoLive"] | undefined) ??
+      ({} as TenantOnboarding["testingGoLive"]),
+    activityLog: Array.isArray(row.activity_log)
+      ? (row.activity_log as TenantOnboarding["activityLog"])
+      : [],
   };
 }
 

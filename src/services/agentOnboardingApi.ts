@@ -9,6 +9,20 @@ import { db } from '@/lib/firebase';
 import { initializeApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
+import {
+  AUDIT_ACTION_AGENT_REGISTER,
+  postSystemAuditLog,
+} from './auditLogApi';
+
+type FunctionErrorWithContext = {
+  context?: unknown;
+};
+
+function asRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
 
 /* ─── Fetch ─── */
 
@@ -24,7 +38,7 @@ export async function fetchAgentOnboarding(tenantId?: string | null): Promise<Ag
   const { data, error } = await query.order('created_at', { ascending: false });
   if (error) throw new Error(error.message);
 
-  return (data || []).map((row: any) => ({
+  return (data || []).map((row) => ({
     id: row.id,
     agentId: row.agent_id,
     userId: row.user_id,
@@ -79,10 +93,10 @@ export async function createAgentViaEdge(params: {
   if (error) {
     let serverMessage = error.message;
     try {
-      const ctx = (error as any).context;
+      const ctx = (error as FunctionErrorWithContext).context;
       if (ctx instanceof Response) {
-        const body = await ctx.json();
-        if (body?.error) serverMessage = body.error;
+        const body = asRecord(await ctx.json());
+        if (typeof body.error === 'string') serverMessage = body.error;
       }
     } catch { /* ignore parse failures */ }
     throw new Error(serverMessage);
@@ -124,12 +138,27 @@ export async function createAgentViaEdge(params: {
       role: 'agent',
       status: 'offline',
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     // console.error('Firebase agent creation failed', err);
-    throw new Error(`Agent created in Supabase but failed in Firebase: ${err.message}`);
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Agent created in Supabase but failed in Firebase: ${message}`);
   } finally {
     await signOut(secondaryAuth);
   }
+
+  void postSystemAuditLog({
+    action: AUDIT_ACTION_AGENT_REGISTER,
+    resourceType: 'agent',
+    resourceId: agentId,
+    details: {
+      userId,
+      email: params.email,
+      agentType: params.agentType,
+      tenantId: tid || null,
+      workshopOwnerUid: params.workshopOwnerUid ?? null,
+      workshopBranchId: params.workshopBranchId ?? null,
+    },
+  }).catch(() => {});
 
   return { agentId, userId };
 }
@@ -162,7 +191,7 @@ export async function updateTrainingChecklist(
 ): Promise<void> {
   const { error } = await supabase
     .from('agent_onboarding')
-    .update({ training_checklist: checklist as any })
+    .update({ training_checklist: checklist as unknown })
     .eq('id', onboardingId);
 
   if (error) throw new Error(error.message);
