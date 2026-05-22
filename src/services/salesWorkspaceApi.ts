@@ -1,5 +1,6 @@
 import { supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
+import { apiFetch } from "@/lib/api";
 
 export type SalesLeadRow = Database["public"]["Tables"]["sales_leads"]["Row"];
 export type SalesCampaignRow = Database["public"]["Tables"]["sales_campaigns"]["Row"];
@@ -232,62 +233,104 @@ export async function fetchSalesCommissionTenant(
 }
 
 export async function fetchSalesSuburbs(tenantId: string): Promise<SalesSuburbRow[]> {
-  const { data, error } = await supabase
-    .from("sales_agent_suburb_assignments")
-    .select("*")
-    .eq("tenant_id", tenantId)
-    .order("suburb", { ascending: true });
-  if (error) throw error;
-  return data ?? [];
+  const tenantKey = tenantId.trim();
+  const raw = await requestSalesSuburbAssignments("GET", { tenantId: tenantKey });
+  const rows = extractAssignmentRows(raw)
+    .map(rowToSalesSuburbAssignment)
+    .filter(
+      (row) =>
+        Boolean(row.id) &&
+        (!tenantKey || !row.tenant_id || row.tenant_id === tenantKey),
+    );
+  return sortSalesSuburbAssignments(rows);
 }
 
 /** Agent-facing: rows for this agent profile (RLS limits to own agent_id). */
 export async function fetchAgentSuburbsAssigned(agentId: string): Promise<SalesSuburbRow[]> {
-  const { data, error } = await supabase
-    .from("sales_agent_suburb_assignments")
-    .select("*")
-    .eq("agent_id", agentId)
-    .order("suburb", { ascending: true });
-  if (error) throw error;
-  return data ?? [];
+  const agentKey = agentId.trim();
+  const raw = await requestSalesSuburbAssignments("GET", { agentId: agentKey });
+  const rows = extractAssignmentRows(raw)
+    .map(rowToSalesSuburbAssignment)
+    .filter(
+      (row) =>
+        Boolean(row.id) &&
+        (!agentKey || !row.agent_id || row.agent_id === agentKey),
+    );
+  return sortSalesSuburbAssignments(rows);
+}
+
+export async function fetchSalesSuburbAssignment(id: string): Promise<SalesSuburbRow | null> {
+  const assignmentId = id.trim();
+  if (!assignmentId) return null;
+
+  try {
+    const raw = await requestSalesSuburbAssignments("GET", { id: assignmentId });
+    const assignment = rowToSalesSuburbAssignment(extractAssignmentRow(raw));
+    return assignment.id ? assignment : null;
+  } catch (err) {
+    if (err instanceof Error && /\b404\b/.test(err.message)) return null;
+    throw err;
+  }
 }
 
 export async function insertSalesSuburb(params: {
   tenantId: string;
   agentId: string;
   suburb: string;
-}): Promise<void> {
-  const { error } = await supabase.from("sales_agent_suburb_assignments").insert({
-    tenant_id: params.tenantId,
-    agent_id: params.agentId,
-    suburb: params.suburb.trim(),
+}): Promise<SalesSuburbRow> {
+  const payload = toSalesSuburbAssignmentPayload(params);
+  const raw = await requestSalesSuburbAssignments("POST", {
+    body: payload,
   });
-  if (error) throw error;
+  const assignment = rowToSalesSuburbAssignment(extractAssignmentRow(raw));
+  return assignment.id
+    ? assignment
+    : rowToSalesSuburbAssignment({ ...payload, tenantId: params.tenantId });
+}
+
+export async function updateSalesSuburb(
+  id: string,
+  params: {
+    tenantId?: string;
+    agentId?: string;
+    suburb?: string;
+  },
+): Promise<SalesSuburbRow | null> {
+  const raw = await requestSalesSuburbAssignments("PATCH", {
+    id,
+    body: toSalesSuburbAssignmentPayload(params),
+  });
+  const assignment = rowToSalesSuburbAssignment(extractAssignmentRow(raw));
+  return assignment.id ? assignment : null;
 }
 
 export async function deleteSalesSuburb(id: string): Promise<void> {
-  const { error } = await supabase.from("sales_agent_suburb_assignments").delete().eq("id", id);
-  if (error) throw error;
+  await requestSalesSuburbAssignments("DELETE", { id });
 }
 
 /** Admin scope */
 export async function fetchSalesSuburbWorkshopsTenant(
   tenantId: string,
 ): Promise<SalesSuburbWorkshopRow[]> {
-  const { data, error } = await supabase
-    .from("sales_suburb_workshops")
-    .select("*")
-    .eq("tenant_id", tenantId)
-    .order("suburb", { ascending: true });
-  if (error) throw error;
-  return data ?? [];
+  const tenantKey = tenantId.trim();
+  const raw = await requestSalesSuburbWorkshops("GET", { tenantId: tenantKey });
+  const rows = extractWorkshopRows(raw)
+    .map(rowToSalesSuburbWorkshop)
+    .filter(
+      (row) =>
+        Boolean(row.id) &&
+        (!tenantKey || !row.tenant_id || row.tenant_id === tenantKey),
+    );
+  return sortSalesSuburbWorkshops(rows);
 }
 
 /** Assigned suburbs only — RLS. */
 export async function fetchSalesSuburbWorkshopsMine(): Promise<SalesSuburbWorkshopRow[]> {
-  const { data, error } = await supabase.from("sales_suburb_workshops").select("*").order("suburb", { ascending: true });
-  if (error) throw error;
-  return data ?? [];
+  const raw = await requestSalesSuburbWorkshops("GET");
+  const rows = extractWorkshopRows(raw)
+    .map(rowToSalesSuburbWorkshop)
+    .filter((row) => Boolean(row.id));
+  return sortSalesSuburbWorkshops(rows);
 }
 
 export async function fetchSalesSuburbWorkshopContactMine(): Promise<SalesSuburbWorkshopContactRow[]> {
@@ -343,6 +386,299 @@ function formatSupabaseError(err: unknown): string {
   return String(err);
 }
 
+function asRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
+
+function pickString(row: Record<string, unknown>, keys: readonly string[]): string {
+  for (const key of keys) {
+    const value = row[key];
+    if (value == null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function rowToSalesSuburbAssignment(raw: unknown): SalesSuburbRow {
+  const row = asRecord(raw);
+
+  return {
+    id: pickString(row, ["id", "assignmentId", "assignment_id"]),
+    tenant_id: pickString(row, ["tenant_id", "tenantId"]),
+    agent_id: pickString(row, ["agent_id", "agentId"]),
+    suburb: pickString(row, ["suburb"]),
+    created_at: pickString(row, ["created_at", "createdAt"]),
+  };
+}
+
+function sortSalesSuburbAssignments(rows: SalesSuburbRow[]): SalesSuburbRow[] {
+  return rows.slice().sort((a, b) => {
+    const bySuburb = normalizeSalesSuburbKey(a.suburb).localeCompare(
+      normalizeSalesSuburbKey(b.suburb),
+    );
+    if (bySuburb !== 0) return bySuburb;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+function extractAssignmentRows(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+
+  const body = asRecord(raw);
+  for (const key of [
+    "assignments",
+    "salesAgentSuburbAssignments",
+    "sales_agent_suburb_assignments",
+    "items",
+    "results",
+    "data",
+  ] as const) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+  }
+
+  const data = asRecord(body.data);
+  for (const key of ["assignments", "items", "results"] as const) {
+    const value = data[key];
+    if (Array.isArray(value)) return value;
+  }
+
+  return [];
+}
+
+function extractAssignmentRow(raw: unknown): unknown {
+  const body = asRecord(raw);
+  for (const key of [
+    "assignment",
+    "salesAgentSuburbAssignment",
+    "sales_agent_suburb_assignment",
+    "item",
+    "result",
+    "data",
+  ] as const) {
+    const value = body[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  }
+  return body;
+}
+
+function rowToSalesSuburbWorkshop(raw: unknown): SalesSuburbWorkshopRow {
+  const row = asRecord(raw);
+  const suburb = pickString(row, ["suburb"]);
+
+  return {
+    id: pickString(row, ["id", "workshopId", "workshop_id"]),
+    tenant_id: pickString(row, ["tenant_id", "tenantId"]),
+    suburb,
+    suburb_normalized:
+      pickString(row, ["suburb_normalized", "suburbNormalized"]) ||
+      normalizeSalesSuburbKey(suburb),
+    workshop_name: pickString(row, ["workshop_name", "workshopName", "name"]),
+    phone_number: pickString(row, ["phone_number", "phoneNumber", "phone"]),
+    owner_name: pickString(row, ["owner_name", "ownerName"]),
+    owner_email: pickString(row, ["owner_email", "ownerEmail"]),
+    location: pickString(row, ["location", "address"]),
+    website: pickString(row, ["website"]),
+    created_at: pickString(row, ["created_at", "createdAt"]),
+    updated_at: pickString(row, ["updated_at", "updatedAt"]),
+  };
+}
+
+function sortSalesSuburbWorkshops(
+  rows: SalesSuburbWorkshopRow[],
+): SalesSuburbWorkshopRow[] {
+  return rows.slice().sort((a, b) => {
+    const bySuburb = normalizeSalesSuburbKey(a.suburb).localeCompare(
+      normalizeSalesSuburbKey(b.suburb),
+    );
+    if (bySuburb !== 0) return bySuburb;
+    const byName = (a.workshop_name || "").localeCompare(
+      b.workshop_name || "",
+      undefined,
+      { sensitivity: "base" },
+    );
+    return byName !== 0 ? byName : a.id.localeCompare(b.id);
+  });
+}
+
+function extractWorkshopRows(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+
+  const body = asRecord(raw);
+  for (const key of ["workshops", "items", "results", "data"] as const) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+  }
+
+  const data = asRecord(body.data);
+  for (const key of ["workshops", "items", "results"] as const) {
+    const value = data[key];
+    if (Array.isArray(value)) return value;
+  }
+
+  return [];
+}
+
+function extractWorkshopRow(raw: unknown): unknown {
+  const body = asRecord(raw);
+  for (const key of [
+    "workshop",
+    "salesSuburbWorkshop",
+    "sales_suburb_workshop",
+    "item",
+    "result",
+    "data",
+  ] as const) {
+    const value = body[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  }
+  return body;
+}
+
+async function readHttpErrorDetail(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "");
+  if (!text.trim()) return "";
+
+  try {
+    const body = asRecord(JSON.parse(text) as unknown);
+    const detail = body.message ?? body.error ?? body.detail;
+    return typeof detail === "string" ? detail : text.slice(0, 400);
+  } catch {
+    return text.slice(0, 400);
+  }
+}
+
+async function parseJsonBody(res: Response): Promise<unknown> {
+  const text = await res.text();
+  return text.trim() ? (JSON.parse(text) as unknown) : null;
+}
+
+async function requestSalesSuburbWorkshops(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  options: {
+    id?: string;
+    tenantId?: string | null;
+    body?: unknown;
+  } = {},
+): Promise<unknown> {
+  const id = options.id?.trim();
+  const search = new URLSearchParams();
+  const tenantId = options.tenantId?.trim();
+  if (tenantId) search.set("tenantId", tenantId);
+
+  const endpoint = `/sales-suburb-workshops${
+    id ? `/${encodeURIComponent(id)}` : ""
+  }${search.size > 0 ? `?${search.toString()}` : ""}`;
+
+  const headers = new Headers({ Accept: "application/json" });
+  if (options.body !== undefined) headers.set("Content-Type", "application/json");
+
+  const res = await apiFetch(endpoint, {
+    method,
+    headers,
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+  });
+
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `Sales suburb workshops API ${method} failed: ${res.status}${
+        detail ? ` - ${detail}` : ""
+      }`,
+    );
+  }
+
+  return parseJsonBody(res);
+}
+
+async function requestSalesSuburbAssignments(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  options: {
+    id?: string;
+    tenantId?: string | null;
+    agentId?: string | null;
+    body?: unknown;
+  } = {},
+): Promise<unknown> {
+  const id = options.id?.trim();
+  const search = new URLSearchParams();
+  const tenantId = options.tenantId?.trim();
+  const agentId = options.agentId?.trim();
+  if (tenantId) search.set("tenantId", tenantId);
+  if (agentId) search.set("agentId", agentId);
+
+  const endpoint = `/sales-agent-suburb-assignments${
+    id ? `/${encodeURIComponent(id)}` : ""
+  }${search.size > 0 ? `?${search.toString()}` : ""}`;
+
+  const headers = new Headers({ Accept: "application/json" });
+  if (options.body !== undefined) headers.set("Content-Type", "application/json");
+
+  const res = await apiFetch(endpoint, {
+    method,
+    headers,
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+  });
+
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `Sales agent suburb assignments API ${method} failed: ${res.status}${
+        detail ? ` - ${detail}` : ""
+      }`,
+    );
+  }
+
+  return parseJsonBody(res);
+}
+
+function toSalesSuburbAssignmentPayload(row: {
+  tenantId?: string;
+  agentId?: string;
+  suburb?: string;
+}): Record<string, string> {
+  const body: Record<string, string> = {};
+
+  const tenantId = row.tenantId?.trim();
+  const agentId = row.agentId?.trim();
+  const suburb = row.suburb?.trim();
+
+  if (tenantId) body.tenantId = tenantId;
+  if (agentId) body.agentId = agentId;
+  if (suburb) body.suburb = suburb;
+
+  return body;
+}
+
+function toSalesSuburbWorkshopPayload(row: {
+  tenantId?: string;
+  suburb: string;
+  workshopName: string;
+  phoneNumber: string;
+  ownerName: string;
+  ownerEmail: string;
+  location: string;
+  website: string;
+}): Record<string, string> {
+  const body: Record<string, string> = {
+    suburb: row.suburb.trim(),
+    workshopName: row.workshopName.trim(),
+    phoneNumber: row.phoneNumber.trim(),
+    ownerName: row.ownerName.trim(),
+    ownerEmail: row.ownerEmail.trim(),
+    location: row.location.trim(),
+    website: row.website.trim(),
+  };
+
+  const tenantId = row.tenantId?.trim();
+  if (tenantId) body.tenantId = tenantId;
+
+  return body;
+}
+
 export async function insertSalesSuburbWorkshop(row: {
   tenantId: string;
   suburb: string;
@@ -353,23 +689,14 @@ export async function insertSalesSuburbWorkshop(row: {
   location: string;
   website: string;
 }): Promise<SalesSuburbWorkshopRow> {
-  // Use RPC to bypass RLS — the function does its own authorization check
-  const { data, error } = await supabase.rpc(
-    "agent_insert_sales_suburb_workshop" as never,
-    {
-      p_tenant_id: row.tenantId,
-      p_suburb: row.suburb.trim(),
-      p_workshop_name: row.workshopName.trim(),
-      p_phone_number: row.phoneNumber.trim(),
-      p_owner_name: row.ownerName.trim(),
-      p_owner_email: row.ownerEmail.trim(),
-      p_location: row.location.trim(),
-      p_website: row.website.trim(),
-    } as never,
-  );
-  if (error) throw new Error(formatSupabaseError(error));
-  if (!data) throw new Error("No row returned after insert — check RLS and migrations.");
-  return data as unknown as SalesSuburbWorkshopRow;
+  const payload = toSalesSuburbWorkshopPayload(row);
+  const raw = await requestSalesSuburbWorkshops("POST", {
+    body: payload,
+  });
+  const workshop = rowToSalesSuburbWorkshop(extractWorkshopRow(raw));
+  return workshop.id
+    ? workshop
+    : rowToSalesSuburbWorkshop({ ...payload, tenantId: row.tenantId });
 }
 
 export async function updateSalesSuburbWorkshop(
@@ -384,24 +711,14 @@ export async function updateSalesSuburbWorkshop(
     website: string;
   },
 ): Promise<void> {
-  const { error } = await supabase
-    .from("sales_suburb_workshops")
-    .update({
-      suburb: row.suburb.trim(),
-      workshop_name: row.workshopName.trim(),
-      phone_number: row.phoneNumber.trim(),
-      owner_name: row.ownerName.trim(),
-      owner_email: row.ownerEmail.trim(),
-      location: row.location.trim(),
-      website: row.website.trim(),
-    })
-    .eq("id", id);
-  if (error) throw new Error(formatSupabaseError(error));
+  await requestSalesSuburbWorkshops("PATCH", {
+    id,
+    body: toSalesSuburbWorkshopPayload(row),
+  });
 }
 
 export async function deleteSalesSuburbWorkshop(id: string): Promise<void> {
-  const { error } = await supabase.from("sales_suburb_workshops").delete().eq("id", id);
-  if (error) throw error;
+  await requestSalesSuburbWorkshops("DELETE", { id });
 }
 
 export async function markSalesSuburbWorkshopCalled(workshopId: string): Promise<void> {

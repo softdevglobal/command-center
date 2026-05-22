@@ -1,5 +1,5 @@
 /**
- * bmsApi.ts — BMS Pro Black  /api/call-center  client
+ * bmsApi.ts — BMS Pro Black `/api/bms-black` client
  *
  * Usage:
  *   import { bmsApi } from '@/services/bmsApi';

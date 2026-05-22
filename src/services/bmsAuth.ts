@@ -6,7 +6,7 @@ const SIGN_IN_REQUIRED =
   'Sign in required to use the workshop API. Please sign in with your dashboard account.';
 
 /**
- * Bearer token for BMS Pro `/api/call-center` requests.
+ * Bearer token for BMS Pro requests.
  * Uses the signed-in Firebase user ID token, or the dashboard backend JWT — never a static env secret.
  */
 export async function getBmsBearerToken(options?: {
@@ -31,7 +31,7 @@ export async function getBmsBearerToken(options?: {
 }
 
 /**
- * Firebase ID token only — for BMS `/api/call-center` routes that must use the
+ * Firebase ID token only — for legacy BMS routes that must use the
  * workshop agent identity (chat). Does not fall back to the Supabase session JWT.
  */
 export async function getFirebaseOnlyBmsBearerToken(): Promise<string> {

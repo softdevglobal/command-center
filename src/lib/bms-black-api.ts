@@ -201,7 +201,7 @@ export type ServiceStaffQuery = {
 
 function buildUrl(path: string, query?: BmsBlackRequestOptions['query']): string {
   const suffix = path.startsWith('/') ? path : `/${path}`;
-  const url = new URL(`${BMS_BLACK_API_BASE}${suffix}`);
+  const url = new URL(`${BMS_BLACK_API_BASE}${suffix}`, window.location.origin);
 
   for (const [key, value] of Object.entries(query ?? {})) {
     if (value == null || value === '') continue;

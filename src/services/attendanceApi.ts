@@ -3,7 +3,7 @@ import {
   getAustralianDateKey,
 } from "@/utils/australianTime";
 import { supabase } from "@/integrations/supabase/client";
-import { apiFetch, getAccessToken } from "@/lib/api";
+import { API_BASE, apiFetch, getAccessToken } from "@/lib/api";
 import {
   AUDIT_ACTION_ATTENDANCE_CLOCK_IN,
   AUDIT_ACTION_ATTENDANCE_CLOCK_OUT,
@@ -14,12 +14,12 @@ import type { AgentShiftSchedule } from "./types";
 import { startOfDay, endOfDay } from "date-fns";
 
 const AGENT_ATTENDANCE_API_URL =
-  (import.meta.env.VITE_AGENT_ATTENDANCE_API_URL as string | undefined)?.trim() ||
-  "http://127.0.0.1:5050/api/agent-attendance";
+  (import.meta.env.VITE_AGENT_ATTENDANCE_API_URL as string | undefined)?.trim().replace(/\/+$/, "") ||
+  `${API_BASE}/agent-attendance`;
 
 const AGENT_SHIFT_SCHEDULES_API_URL =
-  (import.meta.env.VITE_AGENT_SHIFT_SCHEDULES_API_URL as string | undefined)?.trim() ||
-  "http://127.0.0.1:5050/api/agent-shift-schedules";
+  (import.meta.env.VITE_AGENT_SHIFT_SCHEDULES_API_URL as string | undefined)?.trim().replace(/\/+$/, "") ||
+  `${API_BASE}/agent-shift-schedules`;
 
 export const ATTENDANCE_EVENT_TYPES = [
   "clock_in",
@@ -301,8 +301,8 @@ async function fetchAttendanceEventsFromApi(params: {
 } = {}): Promise<AgentAttendanceEventRow[]> {
   const res = await attendanceFetch("/events", {}, {
     userId: params.userId,
-    startDate: params.startIso,
-    endDate: params.endIso,
+    from: params.startIso,
+    to: params.endIso,
   });
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);

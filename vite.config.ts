@@ -15,26 +15,12 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: false,
     },
-    /**
-     * BMS does not send CORS headers for localhost. In dev, point
-     * `VITE_BMS_API_URL` at `/api/call-center` (see `.env.development`) so the
-     * browser only talks to this server; we forward to production.
-     */
+    /** Proxy local `/api/*` development calls to the Command Center backend. */
     proxy: {
-      "/api/call-center": {
-        target: "https://black.bmspros.com.au",
+      "/api": {
+        target: "http://13.236.183.142:5050",
         changeOrigin: true,
-        secure: true,
-      },
-      "/bms-black": {
-        target: "https://black.bmspros.com.au",
-        changeOrigin: true,
-        secure: true,
-      },
-      "/api/support-chat": {
-        target: "https://black.bmspros.com.au",
-        changeOrigin: true,
-        secure: true,
+        secure: false,
       },
     },
   },

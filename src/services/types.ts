@@ -28,7 +28,7 @@ export interface Tenant {
   status: "active" | "inactive";
   brandColor: string;
   didNumbers: string[];
-  /** BMS workshop Firebase owner UID for `/api/call-center` (set per tenant in DB). */
+  /** BMS workshop Firebase owner UID for `/api/bms-black` (set per tenant in DB). */
   bmsOwnerUid?: string | null;
   /** Default BMS branch when not provided by DID mapping or navigation. */
   bmsDefaultBranchId?: string | null;

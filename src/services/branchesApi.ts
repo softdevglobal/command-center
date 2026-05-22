@@ -1,17 +1,16 @@
 import { supabase } from '@/integrations/supabase/client';
-import { getBmsBearerToken } from '@/services/bmsAuth';
+import {
+  BMS_BLACK_API_URL,
+  bmsBlackFetch,
+  bmsBlackHeaders,
+} from '@/services/bmsBlackApi';
 
 const BASE_URL =
-  (import.meta.env.VITE_BMS_API_URL as string) ??
-  'https://black.bmspros.com.au/api/call-center';
+  (import.meta.env.VITE_BMS_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
+  BMS_BLACK_API_URL;
 
-async function apiHeaders(ownerUid: string): Promise<HeadersInit> {
-  const token = await getBmsBearerToken({ waitForFirebaseInit: true });
-  return {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
-    'X-Tenant-Id': ownerUid,
-  };
+function apiHeaders(ownerUid: string): HeadersInit {
+  return bmsBlackHeaders(ownerUid);
 }
 
 export type BmsBranchHoursEntry = {
@@ -84,7 +83,7 @@ export async function resolveSessionTenantBmsIds(
 
 export async function getBranchesForOwner(ownerUid: string): Promise<BmsBranchesResponse> {
   const url = `${BASE_URL}/branches?ownerUid=${encodeURIComponent(ownerUid)}`;
-  const res = await fetch(url, { headers: await apiHeaders(ownerUid) });
+  const res = await bmsBlackFetch(url, { headers: apiHeaders(ownerUid) });
   if (!res.ok) {
     throw new Error(`getBranchesForOwner failed: ${res.status}`);
   }
@@ -97,7 +96,7 @@ export async function getBranchById(
   branchId: string,
 ): Promise<BmsBranchesResponse> {
   const url = `${BASE_URL}/branches/${encodeURIComponent(branchId)}`;
-  const res = await fetch(url, { headers: await apiHeaders(ownerUid) });
+  const res = await bmsBlackFetch(url, { headers: apiHeaders(ownerUid) });
   if (!res.ok) {
     throw new Error(`getBranchById failed: ${res.status}`);
   }

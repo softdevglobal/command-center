@@ -1,20 +1,20 @@
-import { getFirebaseOnlyBmsBearerToken } from '@/services/bmsAuth';
 import { supabase } from '@/integrations/supabase/client';
-import { apiFetch, getAccessToken } from '@/lib/api';
+import { API_BASE, apiFetch, getAccessToken } from '@/lib/api';
 import type { Agent } from '@/services/types';
 
 const BASE_URL =
-  (import.meta.env.VITE_BMS_SUPPORT_CHAT_API_URL as string) ??
-  'https://black.bmspros.com.au/api/support-chat';
+  (import.meta.env.VITE_BMS_SUPPORT_CHAT_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
+  `${API_BASE}/bms-black`;
 
 const AGENT_PREFIX = '/agent/conversations';
 
 const CALL_CENTER_BASE_URL =
-  (import.meta.env.VITE_CALL_CENTER_API_URL as string) ?? 'https://black.bmspros.com.au';
+  (import.meta.env.VITE_CALL_CENTER_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
+  `${API_BASE}/bms-black`;
 
 const AGENT_CHAT_API_URL =
-  (import.meta.env.VITE_AGENT_CHAT_API_URL as string | undefined)?.trim() ||
-  'http://127.0.0.1:5050/api/agent-chat';
+  (import.meta.env.VITE_AGENT_CHAT_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
+  `${API_BASE}/agent-chat`;
 
 // ── Row from GET /agent/conversations (queue | mine) ──────────────────────
 
@@ -135,29 +135,25 @@ export type FetchChatMessagesPage = {
 };
 
 async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const token = await getFirebaseOnlyBmsBearerToken();
   const headers = new Headers(init.headers);
   if (!headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  headers.set('Authorization', `Bearer ${token}`);
   const url = `${BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
 
-  return fetch(url, { ...init, headers });
+  return apiFetch(url, { ...init, headers });
 }
 
 async function authorizedFetchCallCenter(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
-  const token = await getFirebaseOnlyBmsBearerToken();
   const headers = new Headers(init.headers);
   if (!headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  headers.set('Authorization', `Bearer ${token}`);
   const url = `${CALL_CENTER_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
-  return fetch(url, { ...init, headers });
+  return apiFetch(url, { ...init, headers });
 }
 
 async function authorizedFetchAgentChat(
@@ -546,7 +542,7 @@ function toCallCenterWorkshopOwner(raw: unknown): CallCenterWorkshopOwner {
 }
 
 export async function fetchCallCenterWorkshopOwners(): Promise<CallCenterWorkshopOwner[]> {
-  const res = await authorizedFetchCallCenter('/api/call-center/chats/workshop-owners');
+  const res = await authorizedFetchCallCenter('/chats/workshop-owners');
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
     throw new Error(
@@ -601,7 +597,7 @@ export async function startCallCenterChatWithOwner(
   const body: Record<string, unknown> = { workshopOwnerUid };
   if (text != null && text.trim()) body.text = text.trim();
 
-  const res = await authorizedFetchCallCenter('/api/call-center/chats/start-with-owner', {
+  const res = await authorizedFetchCallCenter('/chats/start-with-owner', {
     method: 'POST',
     body: JSON.stringify(body),
   });
@@ -624,7 +620,7 @@ export async function postCallCenterChatMessage(
   text: string,
 ): Promise<ChatMessage | null> {
   const res = await authorizedFetchCallCenter(
-    `/api/call-center/chats/${encodeURIComponent(chatId)}/messages`,
+    `/chats/${encodeURIComponent(chatId)}/messages`,
     { method: 'POST', body: JSON.stringify({ text }) },
   );
 
@@ -658,7 +654,7 @@ export async function postCallCenterChatMessage(
 
 export async function fetchCallCenterChatMessages(chatId: string): Promise<ChatMessage[]> {
   const res = await authorizedFetchCallCenter(
-    `/api/call-center/chats/${encodeURIComponent(chatId)}/messages`,
+    `/chats/${encodeURIComponent(chatId)}/messages`,
   );
   if (res.status === 404) return [];
   if (!res.ok) {
@@ -674,7 +670,7 @@ export async function fetchCallCenterChatMessages(chatId: string): Promise<ChatM
 
 export async function postCallCenterChatClose(chatId: string): Promise<void> {
   const res = await authorizedFetchCallCenter(
-    `/api/call-center/chats/${encodeURIComponent(chatId)}/close`,
+    `/chats/${encodeURIComponent(chatId)}/close`,
     { method: 'POST', body: '{}' },
   );
   if (!res.ok) {

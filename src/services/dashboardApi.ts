@@ -1,5 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
-import { apiFetch } from "@/lib/api";
+import { API_BASE, apiFetch } from "@/lib/api";
 import type {
   Tenant,
   Queue,
@@ -39,8 +39,8 @@ import type { UserSession } from "./types";
 export { ONBOARDING_STAGES };
 
 const CALLS_API_URL =
-  (import.meta.env.VITE_CALLS_API_URL as string | undefined)?.trim() ||
-  "http://127.0.0.1:5050/api/calls";
+  (import.meta.env.VITE_CALLS_API_URL as string | undefined)?.trim().replace(/\/+$/, "") ||
+  `${API_BASE}/calls`;
 
 const DASHBOARD_API_URL =
   (import.meta.env.VITE_DASHBOARD_API_URL as string | undefined)?.trim() ||
@@ -54,7 +54,7 @@ function deriveDashboardApiUrl(callsApiUrl: string): string {
   if (normalized.endsWith("/calls")) {
     return `${normalized.slice(0, -"/calls".length)}/dashboard`;
   }
-  return "http://127.0.0.1:5050/api/dashboard";
+  return `${API_BASE}/dashboard`;
 }
 
 /* ─── Tenants ─── */
@@ -180,8 +180,8 @@ function dashboardApiUrl(
   const suffix = path.trim() ? (path.startsWith("/") ? path : `/${path}`) : "";
   const url = new URL(`${base}${suffix}`, window.location.origin);
   if (tenantId) url.searchParams.set("tenantId", tenantId);
-  if (startDate) url.searchParams.set("startDate", startDate);
-  if (endDate) url.searchParams.set("endDate", endDate);
+  if (startDate) url.searchParams.set("from", startDate);
+  if (endDate) url.searchParams.set("to", endDate);
   return url.toString();
 }
 
@@ -987,8 +987,8 @@ function callsApiUrl(
   const url = new URL(CALLS_API_URL, window.location.origin);
   if (tenantId) url.searchParams.set("tenantId", tenantId);
   url.searchParams.set("limit", String(Math.min(Math.max(limit, 1), 1000)));
-  if (startDate) url.searchParams.set("startDate", startDate);
-  if (endDate) url.searchParams.set("endDate", endDate);
+  if (startDate) url.searchParams.set("from", startDate);
+  if (endDate) url.searchParams.set("to", endDate);
   return url.toString();
 }
 

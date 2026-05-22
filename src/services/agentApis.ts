@@ -2,7 +2,7 @@
  * agentApis.ts — Agents directory REST API (super-admin only)
  *
  * Backed by the Node API on `VITE_AGENTS_API_URL` (defaults to
- * `http://127.0.0.1:5050/api/agents`). The endpoints require an authenticated
+ * `${VITE_API_BASE}/agents`). The endpoints require an authenticated
  * super-admin session (Bearer token).
  *
  *  GET    /api/agents               → list agents
@@ -13,12 +13,12 @@
  *  DELETE /api/agents/:id           → remove an agent (cascade onboarding rows)
  */
 
-import { apiFetch, getAccessToken } from '@/lib/api';
+import { API_BASE, apiFetch, getAccessToken } from '@/lib/api';
 import type { Agent, AgentStatus, WorkshopUserRole } from './types';
 
 const AGENTS_API_URL =
-  (import.meta.env.VITE_AGENTS_API_URL as string | undefined)?.trim() ||
-  'http://127.0.0.1:5050/api/agents';
+  (import.meta.env.VITE_AGENTS_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
+  `${API_BASE}/agents`;
 
 /* ─── Types ───────────────────────────────────────────────────────────── */
 
@@ -503,8 +503,8 @@ export async function fetchAgentsPerformance(
     pathOrId: 'performance',
     params: {
       tenantId: query?.tenantId ?? undefined,
-      startDate: query?.startDate ?? undefined,
-      endDate: query?.endDate ?? undefined,
+      from: query?.startDate ?? undefined,
+      to: query?.endDate ?? undefined,
     },
   });
   return extractRows(raw, ['performance', 'items', 'results', 'data'])

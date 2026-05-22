@@ -7,8 +7,7 @@
  *    already reads during incoming-call screen pop.
  */
 
-import { apiFetch, getAccessToken } from '@/lib/api';
-import { getBmsBearerToken } from '@/services/bmsAuth';
+import { API_BASE, apiFetch, getAccessToken } from '@/lib/api';
 import {
   AUDIT_ACTION_DID_MAPPING_CREATE,
   AUDIT_ACTION_DID_MAPPING_DELETE,
@@ -18,12 +17,12 @@ import {
 import type { DIDMapping } from './types';
 
 const BASE_URL =
-  (import.meta.env.VITE_BMS_API_URL as string) ??
-  'https://black.bmspros.com.au/api/call-center';
+  (import.meta.env.VITE_BMS_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
+  `${API_BASE}/bms-black`;
 
 const DID_MAPPINGS_API_URL =
-  (import.meta.env.VITE_DID_MAPPINGS_API_URL as string | undefined)?.trim() ||
-  'http://127.0.0.1:5050/api/did-mappings';
+  (import.meta.env.VITE_DID_MAPPINGS_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
+  `${API_BASE}/did-mappings`;
 
 /* ─── Types ─── */
 
@@ -55,15 +54,25 @@ export interface DIDMappingInput {
 
 /* ─── BMS API helpers ─── */
 
-async function bmsHeaders(): Promise<HeadersInit> {
-  const token = await getBmsBearerToken({
-    waitForFirebaseInit: true,
-    forceRefreshFirebase: true,
-  });
-  return {
+function bmsUrl(path: string): string {
+  const suffix = path.startsWith('/') ? path : `/${path}`;
+  return `${BASE_URL}${suffix}`;
+}
+
+function bmsHeaders(ownerUid?: string | null): Headers {
+  const headers = new Headers({
+    Accept: 'application/json',
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
-  };
+  });
+  const tenant = ownerUid?.trim();
+  if (tenant) headers.set('X-Tenant-Id', tenant);
+  return headers;
+}
+
+async function bmsFetch(path: string, ownerUid?: string | null): Promise<Response> {
+  return apiFetch(bmsUrl(path), {
+    headers: bmsHeaders(ownerUid),
+  });
 }
 
 interface RawWorkshop {
@@ -96,8 +105,7 @@ function extractWorkshopName(w: RawWorkshop): string {
 export async function fetchBmsWorkshops(): Promise<
   Array<{ ownerUid: string; name: string }>
 > {
-  const url = `${BASE_URL}/workshops`;
-  const res = await fetch(url, { headers: await bmsHeaders() });
+  const res = await bmsFetch('/chats/workshop-owners');
   if (!res.ok) {
     await res.text().catch(() => '');
     // console.error('[DID] fetchBmsWorkshops failed:', res.status);
@@ -105,11 +113,13 @@ export async function fetchBmsWorkshops(): Promise<
   }
   const json = await res.json();
 
-  // Same shape as `fetchBmsWorkshopOptions`: { workshops: [{ workshop: { ownerUid, name, … }, branches, … }] }
+  // New Command Center backend shape: { workshopOwners: [{ ownerUid, name, ... }] }.
   const rawList: Array<Record<string, unknown>> = Array.isArray(json)
     ? json
-    : Array.isArray(json?.workshops)
-      ? json.workshops
+    : Array.isArray(json?.workshopOwners)
+      ? json.workshopOwners
+      : Array.isArray(json?.data?.workshopOwners)
+        ? json.data.workshopOwners
       : [];
 
   return rawList
@@ -127,9 +137,8 @@ export async function fetchBmsWorkshops(): Promise<
 export async function fetchBmsWorkshopBranches(
   ownerUid: string,
 ): Promise<BmsBranchOption[]> {
-  const url = `${BASE_URL}/workshops/${encodeURIComponent(ownerUid)}`;
-  // console.log('[DID] Fetching branches for workshop:', ownerUid, 'from:', url);
-  const res = await fetch(url, { headers: await bmsHeaders() });
+  const params = new URLSearchParams({ ownerUid });
+  const res = await bmsFetch(`/branches?${params.toString()}`, ownerUid);
   if (!res.ok) {
     await res.text().catch(() => '');
     // console.error('[DID] fetchBmsWorkshopBranches failed for', ownerUid, ':', res.status);
@@ -137,10 +146,7 @@ export async function fetchBmsWorkshopBranches(
   }
   const json = await res.json();
   // console.log('[DID] fetchBmsWorkshopBranches raw response for', ownerUid, ':', json);
-  const workshopName =
-    extractWorkshopName(json?.workshop ?? {}) ||
-    extractWorkshopName(json ?? {}) ||
-    ownerUid;
+  const workshopName = extractWorkshopName(json?.workshop ?? {}) || extractWorkshopName(json ?? {}) || ownerUid;
   const rawBranches: RawBranch[] = Array.isArray(json?.branches)
     ? json.branches
     : Array.isArray(json?.workshop?.branches)
@@ -162,63 +168,17 @@ export async function fetchBmsWorkshopBranches(
 /**
  * Convenience: load every workshop + its branches in one pass (super-admin UI).
  *
- * The `/workshops` endpoint already returns branches inline for each workshop,
- * so we parse them directly instead of making N extra API calls.
+ * The new backend exposes workshop owners and branches separately.
  */
 export async function fetchBmsWorkshopOptions(): Promise<BmsWorkshopOption[]> {
-  const url = `${BASE_URL}/workshops`;
-  // console.log('[DID] fetchBmsWorkshopOptions — fetching from:', url);
-  const res = await fetch(url, { headers: await bmsHeaders() });
-  if (!res.ok) {
-    await res.text().catch(() => '');
-    // console.error('[DID] fetchBmsWorkshopOptions failed:', res.status);
-    throw new Error(`Failed to load workshops (${res.status})`);
-  }
-  const json = await res.json();
-
-  // API shape: { workshops: [{ workshop: { ownerUid, name, … }, branches: [...], … }] }
-  const rawList: Array<Record<string, unknown>> = Array.isArray(json)
-    ? json
-    : Array.isArray(json?.workshops)
-      ? json.workshops
-      : [];
-
-  // console.log('[DID] Raw workshop entries:', rawList.length);
-
-  const results: BmsWorkshopOption[] = rawList
-    .map((entry) => {
-      // Each entry has a nested `workshop` object with the actual details
-      const ws = (entry.workshop ?? entry) as RawWorkshop;
-      const ownerUid = extractOwnerUid(ws);
-      const workshopName = extractWorkshopName(ws) || ownerUid;
-
-      // Branches are at the top level of each entry
-      const rawBranches: RawBranch[] = Array.isArray(entry.branches)
-        ? (entry.branches as RawBranch[])
-        : [];
-
-      const branches: BmsBranchOption[] = rawBranches
-        .map((b) => ({
-          id: String(b.id ?? b.branchId ?? ''),
-          name: String(b.name ?? b.branchName ?? ''),
-          ownerUid,
-          workshopName,
-          phone: b.phone ? String(b.phone) : undefined,
-          address: b.address ? String(b.address) : undefined,
-        }))
-        .filter((b) => b.id);
-
-      return { ownerUid, name: workshopName, branches };
-    })
-    .filter((w) => w.ownerUid);
-
-  // console.log(
-  //   '[DID] Parsed workshops:',
-  //   results.length,
-  //   '— with branches:',
-  //   results.filter((w) => w.branches.length > 0).length,
-  // );
-
+  const owners = await fetchBmsWorkshops();
+  const results = await Promise.all(
+    owners.map(async (owner) => ({
+      ownerUid: owner.ownerUid,
+      name: owner.name,
+      branches: await fetchBmsWorkshopBranches(owner.ownerUid).catch(() => []),
+    })),
+  );
   return results.sort((a, b) => a.name.localeCompare(b.name));
 }
 

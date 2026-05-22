@@ -22,9 +22,16 @@ export interface MeResponse {
   agentType: string;
 }
 
+export const DEFAULT_API_BASE = 'http://13.236.183.142:5050/api';
+
 export const API_BASE =
   (import.meta.env.VITE_API_BASE as string | undefined)?.trim().replace(/\/+$/, '') ||
-  'http://127.0.0.1:5050/api';
+  DEFAULT_API_BASE;
+
+export function apiUrl(path = ''): string {
+  const suffix = path.trim() ? (path.startsWith('/') ? path : `/${path}`) : '';
+  return `${API_BASE}${suffix}`;
+}
 
 export const AUTH_STORAGE_KEYS = {
   accessToken: 'access_token',
@@ -43,8 +50,15 @@ type ApiErrorBody = {
 };
 
 function authUrl(path: string): string {
-  const suffix = path.startsWith('/') ? path : `/${path}`;
-  return `${API_BASE}${suffix}`;
+  return apiUrl(path);
+}
+
+function shouldPrefixApiBase(input: string): boolean {
+  if (!input.startsWith('/')) return false;
+  return !(
+    API_BASE.startsWith('/') &&
+    (input === API_BASE || input.startsWith(`${API_BASE}/`))
+  );
 }
 
 function safeJsonParse<T>(value: string | null): T | null {
@@ -152,7 +166,7 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
   }
 
   const url =
-    typeof input === 'string' && input.startsWith('/')
+    typeof input === 'string' && shouldPrefixApiBase(input)
       ? authUrl(input)
       : input;
 

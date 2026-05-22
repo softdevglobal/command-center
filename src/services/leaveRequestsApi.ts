@@ -1,5 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
-import { apiFetch, getAccessToken } from "@/lib/api";
+import { API_BASE, apiFetch, getAccessToken } from "@/lib/api";
 import {
   AUDIT_ACTION_LEAVE_REQUEST_CREATE,
   AUDIT_ACTION_LEAVE_REQUEST_UPDATE,
@@ -7,8 +7,8 @@ import {
 } from "./auditLogApi";
 
 const AGENT_LEAVE_REQUESTS_API_URL =
-  (import.meta.env.VITE_AGENT_LEAVE_REQUESTS_API_URL as string | undefined)?.trim() ||
-  "http://127.0.0.1:5050/api/agent-leave-requests";
+  (import.meta.env.VITE_AGENT_LEAVE_REQUESTS_API_URL as string | undefined)?.trim().replace(/\/+$/, "") ||
+  `${API_BASE}/agent-leave-requests`;
 
 export const LEAVE_DURATION_TYPES = ["full_day", "half_day"] as const;
 export type LeaveDurationType = (typeof LEAVE_DURATION_TYPES)[number];

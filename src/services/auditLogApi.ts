@@ -1,10 +1,10 @@
 import { supabase } from '@/integrations/supabase/client';
-import { apiFetch, getAccessToken } from '@/lib/api';
+import { API_BASE, apiFetch, getAccessToken } from '@/lib/api';
 import type { UserSession } from './types';
 
 const SYSTEM_AUDIT_LOGS_API_URL =
-  (import.meta.env.VITE_SYSTEM_AUDIT_LOGS_API_URL as string | undefined)?.trim() ||
-  'http://127.0.0.1:5050/api/system-audit-logs';
+  (import.meta.env.VITE_SYSTEM_AUDIT_LOGS_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
+  `${API_BASE}/system-audit-logs`;
 
 export const SYSTEM_AUDIT_LOG_ACTIONS = [
   'auth.login',
