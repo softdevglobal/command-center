@@ -1,10 +1,6 @@
 import { supabase } from '@/integrations/supabase/client';
 import type { UserSession } from './types';
 
-const SYSTEM_AUDIT_LOGS_API_URL =
-  (import.meta.env.VITE_SYSTEM_AUDIT_LOGS_API_URL as string | undefined)?.trim() ||
-  'http://127.0.0.1:5050/api/system-audit-logs';
-
 type SupabaseAuditQueryResult = {
   data: unknown;
   error: unknown;
@@ -20,6 +16,7 @@ type SupabaseAuditQuery = PromiseLike<SupabaseAuditQueryResult> & {
   eq(column: string, value: unknown): SupabaseAuditQuery;
   not(column: string, operator: string, value: unknown): SupabaseAuditQuery;
   order(column: string, options?: { ascending?: boolean }): SupabaseAuditQuery;
+  limit(count: number): SupabaseAuditQuery;
 };
 
 type SupabaseDynamicClient = {
@@ -88,6 +85,18 @@ function auditLogsTable(): SupabaseAuditQuery {
   return (supabase as unknown as SupabaseDynamicClient).from('system_audit_logs');
 }
 
+function supabaseErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) return error.message;
+  const row = asRecord(error);
+  const parts = [
+    pickString(row, ['message']),
+    pickString(row, ['details']),
+    pickString(row, ['hint']),
+    pickString(row, ['code']),
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(' - ') : fallback;
+}
+
 /** Normalize DB / client variants so UI matching stays stable. */
 export function normalizeAuditLogEntry(raw: unknown): AuditLogEntry {
   const row = asRecord(raw);
@@ -128,49 +137,6 @@ export function normalizeAuditLogEntry(raw: unknown): AuditLogEntry {
     ]),
     details,
   };
-}
-
-async function getSuperAdminAuditBearerToken(): Promise<string> {
-  const {
-    data: { session },
-  } = await supabase.auth.getSession();
-
-  if (session?.access_token) {
-    return session.access_token;
-  }
-
-  throw new Error('Sign in as super-admin to load audit logs.');
-}
-
-function auditLogsUrl(limit: number): string {
-  const url = new URL(SYSTEM_AUDIT_LOGS_API_URL, window.location.origin);
-  if (limit > 0) {
-    url.searchParams.set('limit', String(limit));
-  }
-  return url.toString();
-}
-
-async function readHttpErrorDetail(res: Response): Promise<string> {
-  const text = await res.text();
-  if (!text.trim()) return '';
-  try {
-    const parsed = JSON.parse(text) as unknown;
-    const body = asRecord(parsed);
-    const detail = body.message ?? body.error ?? body.detail;
-    return typeof detail === 'string' ? detail : text.slice(0, 400);
-  } catch {
-    return text.slice(0, 400);
-  }
-}
-
-function extractAuditRows(raw: unknown): unknown[] {
-  if (Array.isArray(raw)) return raw;
-  const body = asRecord(raw);
-  for (const key of ['logs', 'auditLogs', 'data', 'items', 'results']) {
-    const value = body[key];
-    if (Array.isArray(value)) return value;
-  }
-  return [];
 }
 
 function normKey(s: string | undefined | null): string {
@@ -311,21 +277,21 @@ export async function fetchAnsweredCustomerAgentMap(): Promise<Map<string, strin
  * Fetches recent audit logs for the dashboard.
  */
 export async function fetchSystemAuditLogs(limit: number = 100): Promise<AuditLogEntry[]> {
-  const token = await getSuperAdminAuditBearerToken();
-  const res = await fetch(auditLogsUrl(limit), {
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${token}`,
-    },
-  });
+  const lim = Math.min(Math.max(Math.trunc(limit), 1), 500);
+  const { data, error } = await auditLogsTable()
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(lim);
 
-  if (!res.ok) {
-    const detail = await readHttpErrorDetail(res);
+  if (error) {
     throw new Error(
-      `fetchSystemAuditLogs failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
+      `fetchSystemAuditLogs failed: ${supabaseErrorMessage(
+        error,
+        'Could not load system audit logs from Supabase',
+      )}`,
     );
   }
 
-  const rows = extractAuditRows(await res.json());
+  const rows = Array.isArray(data) ? data : [];
   return rows.map(normalizeAuditLogEntry);
 }
