@@ -1004,24 +1004,6 @@ async function readAgentChatJson(res: Response): Promise<unknown> {
   return text.trim() ? (JSON.parse(text) as unknown) : null;
 }
 
-async function fetchInternalChatAgentsFromApi(): Promise<Agent[] | null> {
-  const res = await authorizedFetchAgentChat('/agents');
-  if (res.status === 404 || res.status === 405) return null;
-  if (!res.ok) {
-    const detail = await readHttpErrorDetail(res);
-    throw new Error(
-      `fetchInternalChatAgents failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
-    );
-  }
-  const rows = collectInternalArray(await readAgentChatJson(res), [
-    'agents',
-    'items',
-    'results',
-    'rows',
-  ]);
-  return uniqueAgents(rows.map((row) => toInternalAgent(row)).filter((a) => Boolean(a.id)));
-}
-
 async function fetchInternalChatAgentsFromSupabase(): Promise<Agent[]> {
   const { data, error } = await supabase
     .from('agents')
@@ -1032,12 +1014,6 @@ async function fetchInternalChatAgentsFromSupabase(): Promise<Agent[]> {
 }
 
 export async function fetchInternalChatAgents(): Promise<Agent[]> {
-  try {
-    const apiAgents = await fetchInternalChatAgentsFromApi();
-    if (apiAgents && apiAgents.length > 0) return apiAgents;
-  } catch (error) {
-    console.warn('[chatApi] Falling back to Supabase internal chat roster:', error);
-  }
   return fetchInternalChatAgentsFromSupabase();
 }
 
