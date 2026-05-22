@@ -6,6 +6,7 @@
  * super-admin session (Bearer token).
  *
  *  GET    /api/agents               → list agents
+ *  POST   /api/agents/register      → create agent + onboarding (Supabase + Firebase)
  *  GET    /api/agents/performance   → aggregated call-handling metrics per agent
  *  GET    /api/agents/:id           → fetch a single agent
  *  PATCH  /api/agents/:id           → update agent fields (name, queues, role, …)
@@ -41,6 +42,28 @@ export interface AgentListQuery {
   tenantId?: string | null;
   queueId?: string | null;
   search?: string | null;
+}
+
+/** Body for `POST /api/agents/register`. */
+export interface AgentRegisterInput {
+  name: string;
+  email: string;
+  phone: string;
+  password: string;
+  extension: string;
+  agentType: 'workshop' | 'command-centre';
+  tenantId?: string | null;
+  notes?: string;
+  workshopOwnerUid?: string;
+  workshopName?: string;
+  workshopBranchId?: string;
+  workshopBranchName?: string;
+  workshopUserRole?: WorkshopUserRole;
+}
+
+export interface AgentRegisterResult {
+  agentId: string;
+  userId: string;
 }
 
 /** Row returned by `GET /api/agents/performance`. */
@@ -256,6 +279,59 @@ function rowToPerformance(raw: unknown): AgentPerformanceRow {
   };
 }
 
+function toRegisterPayload(input: AgentRegisterInput): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    name: input.name.trim(),
+    email: input.email.trim(),
+    phone: input.phone.trim(),
+    password: input.password,
+    extension: input.extension.trim(),
+    agentType: input.agentType,
+  };
+
+  const tenantId = String(input.tenantId ?? '').trim();
+  if (tenantId) body.tenantId = tenantId;
+
+  const notes = String(input.notes ?? '').trim();
+  if (notes) body.notes = notes;
+
+  if (input.agentType === 'workshop') {
+    const workshopOwnerUid = String(input.workshopOwnerUid ?? '').trim();
+    const workshopBranchId = String(input.workshopBranchId ?? '').trim();
+    if (workshopOwnerUid) body.workshopOwnerUid = workshopOwnerUid;
+    if (workshopBranchId) body.workshopBranchId = workshopBranchId;
+    if (input.workshopUserRole) body.workshopUserRole = input.workshopUserRole;
+    const workshopName = String(input.workshopName ?? '').trim();
+    const workshopBranchName = String(input.workshopBranchName ?? '').trim();
+    if (workshopName) body.workshopName = workshopName;
+    if (workshopBranchName) body.workshopBranchName = workshopBranchName;
+  }
+
+  return body;
+}
+
+function extractRegisterResult(raw: unknown): AgentRegisterResult {
+  const body = asRecord(raw);
+  const data = asRecord(body.data);
+  const agent = asRecord(body.agent ?? data.agent ?? body.result ?? data.result);
+  const user = asRecord(body.user ?? data.user ?? body.authUser ?? data.authUser);
+  const onboarding = asRecord(body.onboarding ?? data.onboarding);
+
+  const agentId =
+    pickString(body, ['agentId', 'agent_id', 'id']) ||
+    pickString(data, ['agentId', 'agent_id', 'id']) ||
+    pickString(agent, ['agentId', 'agent_id', 'id']) ||
+    pickString(onboarding, ['agentId', 'agent_id']);
+
+  const userId =
+    pickString(body, ['userId', 'user_id', 'uid', 'firebaseUid', 'firebase_uid']) ||
+    pickString(data, ['userId', 'user_id', 'uid', 'firebaseUid', 'firebase_uid']) ||
+    pickString(user, ['userId', 'user_id', 'id', 'uid']) ||
+    pickString(agent, ['userId', 'user_id', 'uid']);
+
+  return { agentId, userId };
+}
+
 function toUpdatePayload(patch: AgentUpdateInput): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   if (patch.name !== undefined) body.name = patch.name;
@@ -375,6 +451,17 @@ async function requestAgents(
 }
 
 /* ─── Public API ──────────────────────────────────────────────────────── */
+
+/** `POST /api/agents/register` — create agent account and onboarding row. */
+export async function registerAgent(
+  input: AgentRegisterInput,
+): Promise<AgentRegisterResult> {
+  const raw = await requestAgents('POST', {
+    pathOrId: 'register',
+    body: toRegisterPayload(input),
+  });
+  return extractRegisterResult(raw);
+}
 
 /** `GET /api/agents` — list every agent visible to the caller. */
 export async function fetchAgentsList(query?: AgentListQuery): Promise<Agent[]> {

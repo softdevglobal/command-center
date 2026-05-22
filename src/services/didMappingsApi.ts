@@ -336,6 +336,31 @@ function extractMapping(raw: unknown, fallback: DIDMappingInput): DIDMapping {
   return mapped.did ? mapped : rowToMapping(toApiPayload(fallback));
 }
 
+function extractMappingByDid(raw: unknown): DIDMapping | null {
+  const body = asRecord(raw);
+  for (const key of ['mapping', 'didMapping', 'data', 'item', 'result']) {
+    const value = body[key];
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const mapped = rowToMapping(value as Record<string, unknown>);
+      return mapped.did ? mapped : null;
+    }
+  }
+
+  const direct = rowToMapping(body);
+  return direct.did ? direct : null;
+}
+
+function normalizeDidForCompare(value: string): string {
+  return String(value ?? '').replace(/\D/g, '');
+}
+
+function didMatchesCandidate(mappingDid: string, candidate: string): boolean {
+  const left = normalizeDidForCompare(mappingDid);
+  const right = normalizeDidForCompare(candidate);
+  if (!left || !right) return false;
+  return left === right || left.endsWith(right) || right.endsWith(left);
+}
+
 async function requestDidMappings(
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   options: { did?: string; body?: unknown } = {},
@@ -362,6 +387,29 @@ export async function listDIDMappings(): Promise<DIDMapping[]> {
     .map((row) => rowToMapping(asRecord(row)))
     .filter((mapping) => mapping.did)
     .sort((a, b) => a.did.localeCompare(b.did));
+}
+
+/**
+ * Resolve a DID mapping for a single number/label.
+ *
+ * The API supports direct lookup on `/did-mappings/:did`; if that route is not
+ * available in an older backend, fall back to listing mappings and matching by
+ * normalized phone digits.
+ */
+export async function getDIDMappingByDid(did: string): Promise<DIDMapping | null> {
+  const trimmed = did.trim();
+  if (!trimmed) return null;
+
+  try {
+    const raw = await requestDidMappings('GET', { did: trimmed });
+    const direct = extractMappingByDid(raw);
+    if (direct?.did) return direct;
+  } catch {
+    // Fall back to the list endpoint below for API versions without direct lookup.
+  }
+
+  const mappings = await listDIDMappings();
+  return mappings.find((mapping) => didMatchesCandidate(mapping.did, trimmed)) ?? null;
 }
 
 export async function createDIDMapping(input: DIDMappingInput): Promise<DIDMapping> {

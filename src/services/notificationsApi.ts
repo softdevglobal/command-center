@@ -1,18 +1,13 @@
-import { getBmsBearerToken } from "@/services/bmsAuth";
+import {
+  BMS_BLACK_API_URL,
+  bmsBlackFetch,
+  bmsBlackHeaders,
+} from "@/services/bmsBlackApi";
 
-const BASE_URL =
-  (import.meta.env.VITE_BMS_API_URL as string) ??
-  "https://black.bmspros.com.au/api/call-center";
+const BASE_URL = BMS_BLACK_API_URL;
 
-async function apiHeaders(): Promise<HeadersInit> {
-  const token = await getBmsBearerToken({
-    waitForFirebaseInit: true,
-    forceRefreshFirebase: true,
-  });
-  return {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${token}`,
-  };
+function apiHeaders(ownerUid?: string | null): Headers {
+  return bmsBlackHeaders(ownerUid);
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -57,8 +52,8 @@ export type CustomerNotification = {
 export async function fetchCustomerNotifications(): Promise<
   CustomerNotification[]
 > {
-  const res = await fetch(`${BASE_URL}/customer-notifications?all=1`, {
-    headers: await apiHeaders(),
+  const res = await bmsBlackFetch(`${BASE_URL}/customer-notifications?all=1`, {
+    headers: apiHeaders(),
   });
 
   if (!res.ok) {
@@ -135,27 +130,39 @@ export async function markNotificationReviewed(
   notificationId: string,
 ): Promise<void> {
   // console.log("[markNotificationReviewed] calling →", notificationId);
-  await fetch(
+  const res = await bmsBlackFetch(
     `${BASE_URL}/customer-notifications/${notificationId}/notification-reviewed`,
     {
       method: "POST",
-      headers: await apiHeaders(),
+      headers: apiHeaders(),
     },
   );
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `markNotificationReviewed failed: ${res.status}${detail ? ` — ${detail}` : ""}`,
+    );
+  }
 }
 
 export async function markNotificationReviewedClosed(
   notificationId: string,
 ): Promise<void> {
   // console.log("[markNotificationReviewedClosed] calling →", notificationId);
-  await fetch(
+  const res = await bmsBlackFetch(
     `${BASE_URL}/customer-notifications/${notificationId}/notification-reviewed`,
     {
       method: "POST",
-      headers: await apiHeaders(),
+      headers: apiHeaders(),
       body: JSON.stringify({ notificationReviewed: false }),
     },
   );
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `markNotificationReviewedClosed failed: ${res.status}${detail ? ` — ${detail}` : ""}`,
+    );
+  }
 }
 
 // ─── Mark called ─────────────────────────────────────────────────────────────
@@ -163,10 +170,16 @@ export async function markNotificationReviewedClosed(
 export async function markCalledCustomer(
   notificationId: string,
 ): Promise<void> {
-  await fetch(
+  const res = await bmsBlackFetch(
     `${BASE_URL}/customer-notifications/${notificationId}/called-customer`,
-    { method: "POST", headers: await apiHeaders() },
+    { method: "POST", headers: apiHeaders() },
   );
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `markCalledCustomer failed: ${res.status}${detail ? ` — ${detail}` : ""}`,
+    );
+  }
 }
 
 // ─── Additional issue customer response (booking resource) ───────────────────
@@ -208,14 +221,9 @@ export async function patchBookingAdditionalIssueCustomerResponse(
   customerResponse: AdditionalIssueCustomerResponse,
   options?: { ownerUid?: string | null },
 ): Promise<PatchAdditionalIssueCustomerResponseResult> {
-  const headers: HeadersInit = {
-    ...(await apiHeaders()),
-    ...(options?.ownerUid?.trim()
-      ? { "X-Tenant-Id": options.ownerUid.trim() }
-      : {}),
-  };
+  const headers = apiHeaders(options?.ownerUid);
 
-  const res = await fetch(
+  const res = await bmsBlackFetch(
     `${BASE_URL}/bookings/${encodeURIComponent(bookingId)}/additional-issues/${encodeURIComponent(issueId)}`,
     {
       method: "PATCH",
@@ -300,14 +308,9 @@ export async function patchBookingAdditionalIssuePrice(
     }
   }
 
-  const headers: HeadersInit = {
-    ...(await apiHeaders()),
-    ...(options?.ownerUid?.trim()
-      ? { "X-Tenant-Id": options.ownerUid.trim() }
-      : {}),
-  };
+  const headers = apiHeaders(options?.ownerUid);
 
-  const res = await fetch(
+  const res = await bmsBlackFetch(
     `${BASE_URL}/bookings/${encodeURIComponent(bookingId)}/additional-issues/${encodeURIComponent(issueId)}/price`,
     {
       method: "PATCH",

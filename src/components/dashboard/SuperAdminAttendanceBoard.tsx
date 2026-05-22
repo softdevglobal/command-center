@@ -18,7 +18,6 @@ import {
   deriveAttendanceShiftStatus,
   fetchAllAttendanceEventsForDay,
   fetchAllAttendanceEventsForRange,
-  isSupabaseAuthUserId,
   subscribeToAllAttendanceInserts,
   type AgentAttendanceEventRow,
 } from "@/services/attendanceApi";
@@ -77,6 +76,46 @@ function tenantLabel(tenantId: string | null, tenants: Tenant[]): string {
 
 function isCommandCentreAgent(a: Agent): boolean {
   return !String(a.bmsOwnerUid ?? "").trim();
+}
+
+type AttendanceRosterEntry = {
+  key: string;
+  agent: Agent;
+  userIds: string[];
+};
+
+function uniqueNonEmpty(values: Array<string | null | undefined>): string[] {
+  return [...new Set(values.map((value) => value?.trim()).filter(Boolean) as string[])];
+}
+
+function attendanceRosterKey(agent: Agent): string {
+  const userId = agent.userId?.trim();
+  return userId || agent.id;
+}
+
+function attendanceUserIdsForAgent(agent: Agent): string[] {
+  return uniqueNonEmpty([agent.id, agent.userId]);
+}
+
+function buildAttendanceRoster(agents: Agent[]): AttendanceRosterEntry[] {
+  const byKey = new Map<string, AttendanceRosterEntry>();
+
+  for (const agent of agents) {
+    const key = attendanceRosterKey(agent);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, {
+        key,
+        agent,
+        userIds: attendanceUserIdsForAgent(agent),
+      });
+      continue;
+    }
+
+    existing.userIds = uniqueNonEmpty([...existing.userIds, ...attendanceUserIdsForAgent(agent)]);
+  }
+
+  return [...byKey.values()];
 }
 
 /** Given a viewMode and an anchor date, return the [rangeStart, rangeEnd] for fetching. */
@@ -177,14 +216,20 @@ export function SuperAdminAttendanceBoard({
     [agents],
   );
 
+  const commandCentreRoster = useMemo(
+    () => buildAttendanceRoster(commandCentreAgents),
+    [commandCentreAgents],
+  );
+
   const commandCentreUserIds = useMemo(() => {
     const s = new Set<string>();
-    for (const a of commandCentreAgents) {
-      s.add(a.id);
-      if (a.userId && isSupabaseAuthUserId(a.userId)) s.add(a.userId);
+    for (const entry of commandCentreRoster) {
+      for (const userId of entry.userIds) {
+        s.add(userId);
+      }
     }
     return s;
-  }, [commandCentreAgents]);
+  }, [commandCentreRoster]);
 
   // ── Data fetch ──────────────────────────────────────────────────────────────
 
@@ -245,20 +290,27 @@ export function SuperAdminAttendanceBoard({
   };
 
   const rows: AgentAttendanceRow[] = useMemo(() => {
-    const byUser = new Map<string, AgentAttendanceEventRow[]>();
-    for (const e of events) {
-      if (!commandCentreUserIds.has(e.user_id)) continue;
-      const list = byUser.get(e.user_id) || [];
-      list.push(e);
-      byUser.set(e.user_id, list);
+    const rosterKeyByUserId = new Map<string, string>();
+    for (const entry of commandCentreRoster) {
+      for (const userId of entry.userIds) {
+        rosterKeyByUserId.set(userId, entry.key);
+      }
     }
 
-    const rosterIds = [...commandCentreUserIds];
+    const byUser = new Map<string, AgentAttendanceEventRow[]>();
+    for (const e of events) {
+      const rosterKey = rosterKeyByUserId.get(e.user_id);
+      if (!rosterKey) continue;
+      const list = byUser.get(rosterKey) || [];
+      list.push(e);
+      byUser.set(rosterKey, list);
+    }
 
     if (viewMode === "day") {
       // Day view: per-segment detail
-      return rosterIds
-        .map((userId) => {
+      return commandCentreRoster
+        .map((entry) => {
+          const userId = entry.key;
           const evs = byUser.get(userId) || [];
           const sorted = [...evs].sort(
             (a, b) =>
@@ -268,7 +320,7 @@ export function SuperAdminAttendanceBoard({
           const { status } = deriveAttendanceShiftStatus(sorted);
           const { workedMs, breakMs } = computeWorkedAndBreakMs(sorted, segmentNowMs);
           const last = sorted[sorted.length - 1];
-          const agentRow = commandCentreAgents.find((a) => a.id === userId || a.userId === userId);
+          const agentRow = entry.agent;
           const tenantId =
             agentRow?.tenantId ||
             last?.tenant_id ||
@@ -297,8 +349,9 @@ export function SuperAdminAttendanceBoard({
     // Week / Month view: aggregate across all days in the range
     const days = eachDayOfInterval({ start: rangeStart, end: rangeEnd });
 
-    return rosterIds
-      .map((userId) => {
+    return commandCentreRoster
+      .map((entry) => {
+        const userId = entry.key;
         const evs = byUser.get(userId) || [];
         const sorted = [...evs].sort(
           (a, b) =>
@@ -326,7 +379,7 @@ export function SuperAdminAttendanceBoard({
 
         const daysPresent = countDaysPresent(evs);
         const last = sorted[sorted.length - 1];
-        const agentRow = commandCentreAgents.find((a) => a.id === userId || a.userId === userId);
+        const agentRow = entry.agent;
         const tenantId =
           agentRow?.tenantId ||
           last?.tenant_id ||
@@ -356,7 +409,7 @@ export function SuperAdminAttendanceBoard({
   }, [
     events,
     commandCentreAgents,
-    commandCentreUserIds,
+    commandCentreRoster,
     segmentNowMs,
     viewMode,
     rangeStart,

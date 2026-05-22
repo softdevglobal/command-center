@@ -916,6 +916,7 @@ export function NotificationsCard({
   const [answeredItems, setAnsweredItems] = useState<DisplayItem[]>([]);
   const [showAnswered, setShowAnswered] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [notificationsForbidden, setNotificationsForbidden] = useState(false);
   const [selected, setSelected] = useState<DisplayItem | null>(null);
   const [localReviewed, setLocalReviewed] = useState<Set<string>>(new Set());
 
@@ -984,6 +985,8 @@ export function NotificationsCard({
   }, []);
 
   const loadNotifications = useCallback(async () => {
+    if (notificationsForbidden) return;
+
     try {
       const [allNotifs, cMap, aMap] = await Promise.all([
         fetchCustomerNotifications(),
@@ -1030,10 +1033,16 @@ export function NotificationsCard({
       }
 
       setLocalReviewed(new Set());
-    } catch {
-      // console.error("[NotificationsCard] Load failed:", e);
+      setNotificationsForbidden(false);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "";
+      if (message.includes("403")) {
+        setItems([]);
+        setAnsweredItems([]);
+        setNotificationsForbidden(true);
+      }
     }
-  }, [didByOwnerMap, isAgent, session?.userId]);
+  }, [didByOwnerMap, isAgent, notificationsForbidden, session?.userId]);
 
   useEffect(() => {
     if (!session?.userId) return;
@@ -1086,6 +1095,13 @@ export function NotificationsCard({
               <div className="flex items-center justify-center gap-2 py-10 text-slate-400">
                 <div className="h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" />
                 <span className="text-sm">Loading…</span>
+              </div>
+            ) : notificationsForbidden ? (
+              <div className="flex flex-col items-center justify-center gap-2 px-5 py-10 text-center text-slate-400">
+                <XCircle className="h-8 w-8 text-slate-200" />
+                <span className="text-sm">
+                  Notifications are not available for this account.
+                </span>
               </div>
             ) : showAnswered ? (
               /* --- Answered Tab --- */

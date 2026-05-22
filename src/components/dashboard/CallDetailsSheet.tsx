@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CalendarCheck } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -22,6 +22,7 @@ import type {
 } from "@/services/types";
 import { fetchAgentByCallerNumber } from "@/services/dashboardApi";
 import { fetchFirebaseCallerContext } from "@/services/customersApi";
+import { getDIDMappingByDid } from "@/services/didMappingsApi";
 import {
   getServicesByBranch,
   type WorkshopService,
@@ -54,6 +55,7 @@ export interface CallDetailSnapshot {
   customerName: string | null;
   customerPhone: string;
   callStatusText: string;
+  did: string;
   didLabel: string;
   branchId: string;
   branchName: string;
@@ -107,6 +109,7 @@ export function buildIncomingCallSnapshot(
     agentOrGroupLabel: `Group: ${call.groupName}`,
     customerPhone: call.callerNumber,
     customerName: call.callerName,
+    did: call.did,
     didLabel: call.didLabel || call.did,
     branchId: call.branchId ?? "",
     branchName: call.branchName ?? "",
@@ -140,6 +143,7 @@ export function buildLiveCallSnapshot(args: {
     agentOrGroupLabel: `Agent: ${agent.name}${agent.extension ? ` ? Ext ${agent.extension}` : ""}`,
     customerPhone: activeNumber,
     customerName: incomingCall?.callerName ?? null,
+    did: incomingCall?.did || "",
     didLabel:
       incomingCall?.didLabel ||
       incomingCall?.did ||
@@ -171,6 +175,8 @@ export function CallDetailsSheet({
     WorkshopService[] | null
   >(null);
   const [branchServicesLoading, setBranchServicesLoading] = useState(false);
+  const [mappedDetail, setMappedDetail] = useState<Partial<CallDetailSnapshot> | null>(null);
+  const [mappingLoading, setMappingLoading] = useState(false);
   const commandButtons = useMemo(
     () => [
       { label: "Book Now", icon: CalendarPlus2 },
@@ -179,10 +185,97 @@ export function CallDetailsSheet({
     [],
   );
 
+  const effectiveDetail = useMemo(() => {
+    if (!detail || !mappedDetail) return detail;
+    return {
+      ...detail,
+      ...mappedDetail,
+      did: detail.did || mappedDetail.did || "",
+      didLabel: mappedDetail.didLabel || detail.didLabel,
+      branchId: mappedDetail.branchId || detail.branchId,
+      branchName: mappedDetail.branchName || detail.branchName,
+      mappingWorkshopName:
+        mappedDetail.mappingWorkshopName || detail.mappingWorkshopName,
+      ownerId: mappedDetail.ownerId || detail.ownerId,
+      tenantId: mappedDetail.tenantId || detail.tenantId,
+    };
+  }, [detail, mappedDetail]);
+
   useEffect(() => {
     let cancelled = false;
 
-    if (!open || !detail?.customerPhone) {
+    if (!open || !detail) {
+      setMappedDetail(null);
+      setMappingLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (detail.ownerId && detail.branchId) {
+      setMappedDetail(null);
+      setMappingLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const candidates = [detail.did, detail.didLabel]
+      .map((value) => String(value ?? "").trim())
+      .filter((value, index, all) => value && all.indexOf(value) === index);
+
+    if (candidates.length === 0) {
+      setMappedDetail(null);
+      setMappingLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setMappingLoading(true);
+    setMappedDetail(null);
+
+    (async () => {
+      for (const candidate of candidates) {
+        try {
+          const mapping = await getDIDMappingByDid(candidate);
+          if (!mapping) continue;
+          if (cancelled) return;
+          setMappedDetail({
+            did: mapping.did,
+            didLabel: mapping.label || detail.didLabel || mapping.did,
+            tenantId: mapping.tenantId || detail.tenantId,
+            branchId: mapping.branchId,
+            branchName: mapping.branchName,
+            mappingWorkshopName: mapping.mappingWorkshopName,
+            ownerId: mapping.ownerId,
+          });
+          return;
+        } catch {
+          // Try the next candidate. A missing mapping should not block call details.
+        }
+      }
+    })().finally(() => {
+      if (!cancelled) setMappingLoading(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    detail?.branchId,
+    detail?.did,
+    detail?.didLabel,
+    detail?.id,
+    detail?.ownerId,
+    detail?.tenantId,
+    open,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!open || !effectiveDetail?.customerPhone) {
       setCallerContext(null);
       setMatchedAgent(null);
       setContextError(null);
@@ -197,13 +290,13 @@ export function CallDetailsSheet({
     setCallerContext(null);
     setMatchedAgent(null);
 
-    const ownerKey = detail.ownerId || detail.tenantId;
+    const ownerKey = effectiveDetail.ownerId || effectiveDetail.tenantId;
     const firebasePromise = ownerKey
-      ? fetchFirebaseCallerContext(ownerKey, detail.customerPhone)
+      ? fetchFirebaseCallerContext(ownerKey, effectiveDetail.customerPhone)
       : Promise.resolve(null);
     const agentPromise = fetchAgentByCallerNumber(
-      detail.customerPhone,
-      detail.tenantId,
+      effectiveDetail.customerPhone,
+      effectiveDetail.tenantId,
     );
 
     Promise.allSettled([firebasePromise, agentPromise])
@@ -230,12 +323,18 @@ export function CallDetailsSheet({
     return () => {
       cancelled = true;
     };
-  }, [detail?.id, detail?.tenantId, detail?.ownerId, detail?.customerPhone, open]);
+  }, [
+    effectiveDetail?.id,
+    effectiveDetail?.tenantId,
+    effectiveDetail?.ownerId,
+    effectiveDetail?.customerPhone,
+    open,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
 
-    if (!open || !detail?.branchId || !detail?.ownerId) {
+    if (!open || !effectiveDetail?.branchId || !effectiveDetail?.ownerId) {
       setBranchServices(null);
       setBranchServicesLoading(false);
       return () => {
@@ -245,7 +344,7 @@ export function CallDetailsSheet({
 
     setBranchServicesLoading(true);
 
-    getServicesByBranch(detail.ownerId, detail.branchId)
+    getServicesByBranch(effectiveDetail.ownerId, effectiveDetail.branchId)
       .then((services) => {
         if (!cancelled) setBranchServices(services);
       })
@@ -259,13 +358,13 @@ export function CallDetailsSheet({
     return () => {
       cancelled = true;
     };
-  }, [detail?.branchId, detail?.ownerId, open]);
+  }, [effectiveDetail?.branchId, effectiveDetail?.ownerId, open]);
 
 
   const resolvedCustomerName =
     callerContext?.customer.name ||
     matchedAgent?.name ||
-    normalizeCustomerName(detail?.customerName);
+    normalizeCustomerName(effectiveDetail?.customerName);
   const resolvedCustomerEmail =
     callerContext?.customer.email || matchedAgent?.email || "";
   const availableVehicles = callerContext?.vehicles || [];
@@ -275,8 +374,8 @@ export function CallDetailsSheet({
     : "bg-slate-100 text-slate-700 ring-1 ring-slate-200";
   const matchedAgentWorkshop =
     matchedAgent?.tenantName ||
-    detail?.mappingWorkshopName ||
-    detail?.workshopName ||
+    effectiveDetail?.mappingWorkshopName ||
+    effectiveDetail?.workshopName ||
     "";
   const matchedAgentRoleLabel = matchedAgent
     ? formatMatchedAgentRole(matchedAgent)
@@ -288,9 +387,8 @@ export function CallDetailsSheet({
       : contextLoading
         ? "Searching..."
         : "Unknown Caller";
-  const canOpenBooking = detail?.mode === "live";
-  // const canOpenBooking = true;
-  if (!detail) return null;
+  if (!effectiveDetail) return null;
+  const activeDetail = effectiveDetail;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -307,11 +405,11 @@ export function CallDetailsSheet({
                   variant="outline"
                   className="rounded-full border-0 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em]"
                   style={{
-                    color: detail.workshopColor,
-                    background: `${detail.workshopColor}18`,
+                    color: activeDetail.workshopColor,
+                    background: `${activeDetail.workshopColor}18`,
                   }}
                 >
-                  {detail.mode === "incoming" ? "Incoming Call" : "Live Call"}
+                  {activeDetail.mode === "incoming" ? "Incoming Call" : "Live Call"}
                 </Badge>
                 <div
                   className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${statusTone}`}
@@ -324,7 +422,7 @@ export function CallDetailsSheet({
                 {resolvedCustomerName}
               </SheetTitle>
               <SheetDescription className="text-sm text-slate-600">
-                {detail.callStatusText}
+                {activeDetail.callStatusText}
               </SheetDescription>
             </SheetHeader>
 
@@ -372,11 +470,11 @@ export function CallDetailsSheet({
                       Workshop / Branch
                     </div>
                     <div className="mt-2 text-lg font-semibold text-slate-950">
-                      {(detail.mappingWorkshopName || detail.workshopName) +
-                        (detail.branchName ? ` - ${detail.branchName}` : "")}
+                      {(activeDetail.mappingWorkshopName || activeDetail.workshopName) +
+                        (activeDetail.branchName ? ` - ${activeDetail.branchName}` : "")}
                     </div>
                     <div className="mt-1 text-sm text-slate-600">
-                      {detail.queueName}
+                      {activeDetail.queueName}
                     </div>
                   </div>
                   <div>
@@ -384,10 +482,10 @@ export function CallDetailsSheet({
                       Caller
                     </div>
                     <div className="mt-2 text-lg font-semibold text-slate-950">
-                      {formatPhone(detail.customerPhone)}
+                      {formatPhone(activeDetail.customerPhone)}
                     </div>
                     <div className="mt-1 text-sm text-slate-600">
-                      {detail.agentOrGroupLabel}
+                      {activeDetail.agentOrGroupLabel}
                     </div>
                   </div>
                   <div>
@@ -403,16 +501,21 @@ export function CallDetailsSheet({
                       Line / DID
                     </div>
                     <div className="mt-2 text-sm font-medium text-slate-900">
-                      {detail.didLabel}
+                      {activeDetail.didLabel}
+                      {mappingLoading ? (
+                        <span className="ml-2 text-xs text-slate-400">
+                          loading mapping...
+                        </span>
+                      ) : null}
                     </div>
                   </div>
-                  {detail.ownerId && (
+                  {activeDetail.ownerId && (
                     <div>
                       <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-slate-500">
                         Owner ID
                       </div>
                       {/* <div className="mt-2 text-sm font-medium text-slate-900 font-mono text-xs">
-                        {detail.ownerId}
+                        {activeDetail.ownerId}
                       </div> */}
                     </div>
                   )}
@@ -467,32 +570,41 @@ export function CallDetailsSheet({
                           command.label === "Book Now" ? "default" : "outline"
                         }
                         className="justify-start"
-                        // disabled={command.label === 'Book Now' && !canOpenBooking}
+                        disabled={
+                          (command.label === "Book Now" ||
+                            command.label === "Booking Details") &&
+                          (mappingLoading ||
+                            !activeDetail.ownerId ||
+                            !activeDetail.branchId)
+                        }
                         onClick={() => {
                           if (command.label === "Book Now") {
-                            if (detail) saveCallDetailToSession(detail);
+                            saveCallDetailToSession(activeDetail);
                             navigate("/booking", {
                               state: {
-                                tenantId: detail?.tenantId ?? "",
+                                tenantId: activeDetail.tenantId ?? "",
                                 customerId: callerContext?.customer.id ?? null,
                                 customerName: resolvedCustomerName ?? "",
-                                customerPhone: detail?.customerPhone ?? "",
+                                customerPhone: activeDetail.customerPhone ?? "",
                                 customerEmail: resolvedCustomerEmail ?? "",
                                 availableVehicles: availableVehicles,
-                                workshopName: detail?.workshopName ?? "",
-                                workshopColor: detail?.workshopColor ?? "",
-                                branchId: detail?.branchId ?? "",
-                                ownerId: detail?.ownerId ?? "",
+                                workshopName:
+                                  activeDetail.mappingWorkshopName ||
+                                  activeDetail.workshopName ||
+                                  "",
+                                workshopColor: activeDetail.workshopColor ?? "",
+                                branchId: activeDetail.branchId ?? "",
+                                ownerId: activeDetail.ownerId ?? "",
                               },
                             });
                             return;
                           }
                           if (command.label === "Booking Details") {
-                            if (detail) saveCallDetailToSession(detail);
+                            saveCallDetailToSession(activeDetail);
                             navigate("/bookings/dashboard", {
                               state: {
-                                ownerId: detail?.ownerId ?? "",
-                                branchId: detail?.branchId ?? "",
+                                ownerId: activeDetail.ownerId ?? "",
+                                branchId: activeDetail.branchId ?? "",
                               },
                             });
                             return;

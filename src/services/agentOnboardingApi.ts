@@ -5,24 +5,11 @@ import type {
   TrainingChecklist,
   WorkshopUserRole,
 } from './types';
-import { db } from '@/lib/firebase';
-import { initializeApp } from 'firebase/app';
-import { getAuth, createUserWithEmailAndPassword, signOut } from 'firebase/auth';
-import { doc, setDoc } from 'firebase/firestore';
+import { registerAgent } from './agentApis';
 import {
   AUDIT_ACTION_AGENT_REGISTER,
   postSystemAuditLog,
 } from './auditLogApi';
-
-type FunctionErrorWithContext = {
-  context?: unknown;
-};
-
-function asRecord(raw: unknown): Record<string, unknown> {
-  return raw && typeof raw === 'object' && !Array.isArray(raw)
-    ? (raw as Record<string, unknown>)
-    : {};
-}
 
 /* ─── Fetch ─── */
 
@@ -62,7 +49,7 @@ export async function fetchAgentOnboarding(tenantId?: string | null): Promise<Ag
   }));
 }
 
-/* ─── Create Agent (via edge function) ─── */
+/* ─── Create Agent (via REST API) ─── */
 
 export async function createAgentViaEdge(params: {
   name: string;
@@ -81,80 +68,17 @@ export async function createAgentViaEdge(params: {
   workshopBranchName?: string;
   workshopUserRole?: WorkshopUserRole;
 }): Promise<{ agentId: string; userId: string }> {
-  const tid = String(params.tenantId ?? '').trim();
-
-  // 1. Supabase Creation
-  const { data, error } = await supabase.functions.invoke('create-agent', {
-    body: {
-      ...params,
-      tenantId: tid || undefined,
-    },
-  });
-  if (error) {
-    let serverMessage = error.message;
-    try {
-      const ctx = (error as FunctionErrorWithContext).context;
-      if (ctx instanceof Response) {
-        const body = asRecord(await ctx.json());
-        if (typeof body.error === 'string') serverMessage = body.error;
-      }
-    } catch { /* ignore parse failures */ }
-    throw new Error(serverMessage);
-  }
-  if (data?.error) throw new Error(data.error);
-
-  const { agentId, userId } = data;
-
-  // 2. Firebase Creation
-  const secondaryApp = initializeApp({
-    apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
-    authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-    projectId:         import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  }, `AgentCreationApp_${Date.now()}`);
-  
-  const secondaryAuth = getAuth(secondaryApp);
-
-  try {
-    const userCredential = await createUserWithEmailAndPassword(secondaryAuth, params.email, params.password);
-    const firebaseUid = userCredential.user.uid;
-    
-    await setDoc(doc(db, 'call_center_agents', firebaseUid), {
-      name: params.name,
-      email: params.email,
-      phone: params.phone || '',
-      extension: params.extension.trim(),
-      notes: params.notes || '',
-      tenantId: tid || '',
-      agentType: params.agentType,
-      workshopOwnerUid: params.workshopOwnerUid ?? '',
-      workshopName: params.workshopName ?? '',
-      workshopBranchId: params.workshopBranchId ?? '',
-      workshopBranchName: params.workshopBranchName ?? '',
-      workshopUserRole: params.workshopUserRole ?? '',
-      queueIds: [],
-      groupIds: [],
-      supabaseUserId: userId,
-      invitedAt: new Date().toISOString(),
-      role: 'agent',
-      status: 'offline',
-    });
-  } catch (err: unknown) {
-    // console.error('Firebase agent creation failed', err);
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Agent created in Supabase but failed in Firebase: ${message}`);
-  } finally {
-    await signOut(secondaryAuth);
-  }
+  const { agentId, userId } = await registerAgent(params);
 
   void postSystemAuditLog({
     action: AUDIT_ACTION_AGENT_REGISTER,
     resourceType: 'agent',
-    resourceId: agentId,
+    resourceId: agentId || null,
     details: {
       userId,
       email: params.email,
       agentType: params.agentType,
-      tenantId: tid || null,
+      tenantId: String(params.tenantId ?? '').trim() || null,
       workshopOwnerUid: params.workshopOwnerUid ?? null,
       workshopBranchId: params.workshopBranchId ?? null,
     },

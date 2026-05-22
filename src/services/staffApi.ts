@@ -7,24 +7,21 @@
  * dedicated endpoint is unavailable.
  */
 
-import { getBmsBearerToken } from '@/services/bmsAuth';
+import {
+  BMS_BLACK_API_URL,
+  bmsBlackFetch,
+  bmsBlackHeaders,
+} from '@/services/bmsBlackApi';
 
-const BASE_URL =
-  (import.meta.env.VITE_BMS_API_URL as string) ??
-  'https://black.bmspros.com.au/api/call-center';
+const BASE_URL = BMS_BLACK_API_URL;
 
 export interface StaffMember {
   id: string;
   name: string;
 }
 
-async function apiHeaders(ownerUid: string): Promise<HeadersInit> {
-  const token = await getBmsBearerToken({ waitForFirebaseInit: true });
-  return {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${token}`,
-    'X-Tenant-Id': ownerUid,
-  };
+function apiHeaders(ownerUid: string): HeadersInit {
+  return bmsBlackHeaders(ownerUid);
 }
 
 /**
@@ -37,7 +34,7 @@ export async function getStaffByBranch(
 ): Promise<StaffMember[]> {
   try {
     const url = `${BASE_URL}/staff?branchId=${encodeURIComponent(branchId)}`;
-    const res = await fetch(url, { headers: await apiHeaders(ownerUid) });
+    const res = await bmsBlackFetch(url, { headers: apiHeaders(ownerUid) });
     if (!res.ok) return [];
     const json = await res.json();
     const raw: unknown[] = json.staff ?? json ?? [];

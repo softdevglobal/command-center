@@ -26,6 +26,11 @@ export default defineConfig(({ mode }) => ({
         changeOrigin: true,
         secure: true,
       },
+      "/bms-black": {
+        target: "https://black.bmspros.com.au",
+        changeOrigin: true,
+        secure: true,
+      },
       "/api/support-chat": {
         target: "https://black.bmspros.com.au",
         changeOrigin: true,

@@ -8,7 +8,13 @@
  *   const booking = await api.createBooking({ ... });
  */
 
-const BASE_URL = 'https://black.bmspros.com.au/api/call-center';
+import {
+  BMS_BLACK_API_URL,
+  bmsBlackFetch,
+  bmsBlackHeaders,
+} from '@/services/bmsBlackApi';
+
+const BASE_URL = BMS_BLACK_API_URL;
 
 /* ─────────────────────── Types ─────────────────────── */
 
@@ -116,14 +122,8 @@ async function request<T>(
   path: string,
   options: RequestInit & { token?: string; tenant?: string } = {},
 ): Promise<T> {
-  const { token, tenant, ...init } = options;
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    ...(tenant ? { 'X-Tenant-Id': tenant } : {}),
-    ...(init.headers as Record<string, string> | undefined),
-  };
+  const { token: _token, tenant, ...init } = options;
+  const headers = bmsBlackHeaders(tenant, init.headers);
 
   // DEBUG: Log exactly what we're sending (remove after fixing)
   // console.log('[BMS API DEBUG]', {
@@ -133,7 +133,7 @@ async function request<T>(
   //   body: init.body ? JSON.parse(init.body as string) : undefined,
   // });
 
-  const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
+  const res = await bmsBlackFetch(`${BASE_URL}${path}`, { ...init, headers });
 
   if (!res.ok) {
     let message = `BMS API error ${res.status}`;
@@ -183,8 +183,11 @@ export function bmsApi(idToken: string | null, ownerUid?: string | null) {
 
   /* ── Services ── */
   const getServices = (branchId?: string) => {
-    const q = branchId ? `?branchId=${encodeURIComponent(branchId)}` : '';
-    return request<BmsService[]>(`/services${q}`, { token, tenant });
+    if (branchId) {
+      const q = `?branchId=${encodeURIComponent(branchId)}`;
+      return request<BmsService[]>(`/services-by-branch${q}`, { token, tenant });
+    }
+    return request<BmsService[]>('/services', { token, tenant });
   };
 
   const getService = (serviceId: string) =>
@@ -277,7 +280,7 @@ export function bmsApi(idToken: string | null, ownerUid?: string | null) {
     if (params?.branchId) q.set('branchId', params.branchId);
     if (params?.customerId) q.set('customerId', params.customerId);
     if (params?.limit) q.set('limit', String(params.limit));
-    return request<BmsBooking[]>(`/bookings?${q}`, { token, tenant });
+    return request<BmsBooking[]>(`/getallbooking?${q}`, { token });
   };
 
   /* ── Additional Issues ── */
