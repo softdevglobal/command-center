@@ -1,3 +1,5 @@
+import { supabase } from '@/integrations/supabase/client';
+
 export interface LoginResponse {
   access_token: string;
   refresh_token: string;
@@ -107,8 +109,27 @@ export function storeAuthSession(response: LoginResponse): void {
   localStorage.setItem(AUTH_STORAGE_KEYS.agentType, response.agentType ?? '');
 }
 
+export async function syncSupabaseAuthSession(
+  tokens: { accessToken?: string | null; refreshToken?: string | null } = {},
+): Promise<void> {
+  const accessToken = tokens.accessToken ?? localStorage.getItem(AUTH_STORAGE_KEYS.accessToken);
+  const refreshToken = tokens.refreshToken ?? localStorage.getItem(AUTH_STORAGE_KEYS.refreshToken);
+
+  if (!accessToken || !refreshToken) return;
+
+  const { error } = await supabase.auth.setSession({
+    access_token: accessToken,
+    refresh_token: refreshToken,
+  });
+
+  if (error) {
+    console.warn('[api] Could not sync Supabase auth session:', error.message);
+  }
+}
+
 export function clearAuthStorage(): void {
   Object.values(AUTH_STORAGE_KEYS).forEach((key) => localStorage.removeItem(key));
+  void supabase.auth.signOut();
 }
 
 export function authHeaders(): HeadersInit {
@@ -132,6 +153,10 @@ export async function login(email: string, password: string): Promise<LoginRespo
 
   const body = (await res.json()) as LoginResponse;
   storeAuthSession(body);
+  await syncSupabaseAuthSession({
+    accessToken: body.access_token,
+    refreshToken: body.refresh_token,
+  });
   return body;
 }
 

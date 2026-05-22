@@ -17,6 +17,7 @@ import {
   getStoredUser,
   login as backendLogin,
   logout as clientLogout,
+  syncSupabaseAuthSession,
   type LoginResponse,
   type MeResponse,
 } from '@/lib/api';
@@ -143,6 +144,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       try {
+        await syncSupabaseAuthSession();
         const me = await getMe();
         if (cancelled) return;
         const nextUser = userFromMe(me);
