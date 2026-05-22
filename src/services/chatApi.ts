@@ -984,6 +984,23 @@ function extractInternalConversationId(raw: unknown): string {
   return '';
 }
 
+function extractInternalMessage(raw: unknown, conversationId: string): InternalChatMessage | null {
+  const body = asRecord(raw);
+  const candidates = [
+    body,
+    asRecord(body.message),
+    asRecord(body.data),
+    asRecord(body.result),
+  ];
+
+  for (const candidate of candidates) {
+    const message = toInternalMessage(candidate, conversationId);
+    if (message.id && message.content) return message;
+  }
+
+  return null;
+}
+
 type InternalChatSupabaseResult = {
   error: { message?: string } | null;
 };
@@ -1014,14 +1031,18 @@ async function fetchInternalChatAgentsFromSupabase(): Promise<Agent[]> {
   return uniqueAgents((data ?? []).map((row) => toInternalAgent(row)));
 }
 
-export async function fetchInternalChatAgents(): Promise<Agent[]> {
-  try {
-    const apiAgents = await fetchAgentsList();
-    if (apiAgents.length > 0) {
-      return uniqueAgents(apiAgents.filter(isCommandCentreAgent));
+export async function fetchInternalChatAgents(
+  options: { preferAgentsApi?: boolean } = {},
+): Promise<Agent[]> {
+  if (options.preferAgentsApi) {
+    try {
+      const apiAgents = await fetchAgentsList();
+      if (apiAgents.length > 0) {
+        return uniqueAgents(apiAgents.filter(isCommandCentreAgent));
+      }
+    } catch (error) {
+      console.warn('[chatApi] Agents API roster unavailable, falling back to Supabase:', error);
     }
-  } catch (error) {
-    console.warn('[chatApi] Agents API roster unavailable, falling back to Supabase:', error);
   }
 
   return fetchInternalChatAgentsFromSupabase();
@@ -1130,7 +1151,7 @@ export async function sendInternalMessage(
   conversationId: string,
   senderId: string | null | undefined,
   content: string,
-): Promise<void> {
+): Promise<InternalChatMessage | null> {
   void senderId;
   const res = await authorizedFetchAgentChat(
     `/conversations/${encodeURIComponent(conversationId)}/messages`,
@@ -1143,6 +1164,7 @@ export async function sendInternalMessage(
     const detail = await readHttpErrorDetail(res);
     throw new Error(`sendInternalMessage failed: ${res.status}${detail ? ` - ${detail}` : ''}`);
   }
+  return extractInternalMessage(await readAgentChatJson(res), conversationId);
 }
 
 export async function getOrCreateInternalConversation(

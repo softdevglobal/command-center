@@ -157,6 +157,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
   const [internalRoster, setInternalRoster] = useState<Agent[]>([]);
   const [rosterLoading, setRosterLoading] = useState(true);
   const [rosterError, setRosterError] = useState<string | null>(null);
+  const isSuperAdmin = session.role === 'super-admin';
 
   useEffect(() => {
     let cancelled = false;
@@ -164,7 +165,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
     setRosterLoading(!hasDashboardRoster);
     setRosterError(null);
 
-    fetchInternalChatAgents()
+    fetchInternalChatAgents({ preferAgentsApi: isSuperAdmin })
       .then((rows) => {
         if (!cancelled) setInternalRoster(rows);
       })
@@ -185,7 +186,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
     return () => {
       cancelled = true;
     };
-  }, [agents.length]);
+  }, [agents.length, isSuperAdmin]);
 
   const chatAgents = useMemo(() => {
     const byId = new Map<string, Agent>();
@@ -204,8 +205,6 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
     findCurrentAgent(chatAgents, session),
     [chatAgents, session]
   );
-
-  const isSuperAdmin = session.role === 'super-admin';
 
   const superAdminSenderId = useMemo(
     () =>
@@ -311,6 +310,31 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
     }
   }, [agentsById, messagingAgentId, isSuperAdmin, rosterLoading]);
 
+  const loadMessages = useCallback(async (conversationId: string) => {
+    try {
+      const { markInternalMessagesAsRead, markInternalConversationAllRead } =
+        await import('@/services/chatApi');
+      const data = await fetchInternalMessages(conversationId);
+      setMessages(data);
+
+      if (messagingAgentId) {
+        await markInternalMessagesAsRead(conversationId, messagingAgentId);
+        setConversations(prev => prev.map(c =>
+          c.id === conversationId ? { ...c, unreadCount: 0 } : c
+        ));
+        window.dispatchEvent(new CustomEvent('internal-chat-read'));
+      } else if (isSuperAdmin) {
+        await markInternalConversationAllRead(conversationId);
+        setConversations(prev => prev.map(c =>
+          c.id === conversationId ? { ...c, unreadCount: 0 } : c
+        ));
+        window.dispatchEvent(new CustomEvent('internal-chat-read'));
+      }
+    } catch (error) {
+      console.error('Failed to load messages', error);
+    }
+  }, [messagingAgentId, isSuperAdmin]);
+
   useEffect(() => {
     loadConversations();
     const unsub = subscribeToAllInternalConversations(() => {
@@ -326,32 +350,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
       return;
     }
 
-    const loadMessages = async () => {
-      try {
-        const { markInternalMessagesAsRead, markInternalConversationAllRead } =
-          await import('@/services/chatApi');
-        const data = await fetchInternalMessages(selectedConvId);
-        setMessages(data);
-        
-        if (messagingAgentId) {
-          await markInternalMessagesAsRead(selectedConvId, messagingAgentId);
-          setConversations(prev => prev.map(c => 
-            c.id === selectedConvId ? { ...c, unreadCount: 0 } : c
-          ));
-          window.dispatchEvent(new CustomEvent('internal-chat-read'));
-        } else if (isSuperAdmin) {
-          await markInternalConversationAllRead(selectedConvId);
-          setConversations(prev => prev.map(c =>
-            c.id === selectedConvId ? { ...c, unreadCount: 0 } : c
-          ));
-          window.dispatchEvent(new CustomEvent('internal-chat-read'));
-        }
-      } catch (error) {
-        console.error('Failed to load messages', error);
-      }
-    };
-
-    loadMessages();
+    void loadMessages(selectedConvId);
     const unsub = subscribeToInternalMessages(selectedConvId, (msg) => {
       setMessages(prev => {
         if (prev.some(m => m.id === msg.id)) return prev;
@@ -367,7 +366,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
     });
 
     return () => { unsub(); };
-  }, [selectedConvId, loadConversations, messagingAgentId, isSuperAdmin]);
+  }, [selectedConvId, loadMessages, loadConversations, messagingAgentId]);
 
   const selectedConv = useMemo(() => 
     conversations.find(c => c.id === selectedConvId), 
@@ -477,7 +476,17 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
     setDraft('');
     setComposeError(null);
     try {
-      await sendInternalMessage(selectedConvId, messagingAgentId, content);
+      const sentMessage = await sendInternalMessage(selectedConvId, messagingAgentId, content);
+      if (sentMessage) {
+        setMessages(prev =>
+          prev.some((message) => message.id === sentMessage.id)
+            ? prev
+            : [...prev, sentMessage],
+        );
+      } else {
+        await loadMessages(selectedConvId);
+      }
+      await loadConversations();
     } catch (error) {
       console.error('Failed to send message', error);
       setComposeError('Failed to send message.');
