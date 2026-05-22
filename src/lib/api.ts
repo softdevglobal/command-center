@@ -22,7 +22,7 @@ export interface MeResponse {
   agentType: string;
 }
 
-export const DEFAULT_API_BASE = 'http://13.236.183.142:5050/api';
+export const DEFAULT_API_BASE = '/api';
 
 export const API_BASE =
   (import.meta.env.VITE_API_BASE as string | undefined)?.trim().replace(/\/+$/, '') ||
