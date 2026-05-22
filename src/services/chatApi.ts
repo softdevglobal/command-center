@@ -1,5 +1,6 @@
 import { supabase } from '@/integrations/supabase/client';
 import { API_BASE, apiFetch, getAccessToken } from '@/lib/api';
+import { fetchAgentsList } from '@/services/agentApis';
 import type { Agent } from '@/services/types';
 
 const BASE_URL =
@@ -1014,6 +1015,15 @@ async function fetchInternalChatAgentsFromSupabase(): Promise<Agent[]> {
 }
 
 export async function fetchInternalChatAgents(): Promise<Agent[]> {
+  try {
+    const apiAgents = await fetchAgentsList();
+    if (apiAgents.length > 0) {
+      return uniqueAgents(apiAgents.filter(isCommandCentreAgent));
+    }
+  } catch (error) {
+    console.warn('[chatApi] Agents API roster unavailable, falling back to Supabase:', error);
+  }
+
   return fetchInternalChatAgentsFromSupabase();
 }
 
