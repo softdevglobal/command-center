@@ -51,6 +51,10 @@ type ApiErrorBody = {
   detail?: string;
 };
 
+type ApiFetchInit = RequestInit & {
+  logoutOnUnauthorized?: boolean;
+};
+
 function authUrl(path: string): string {
   return apiUrl(path);
 }
@@ -88,6 +92,11 @@ export function getAccessToken(): string | null {
   return localStorage.getItem(AUTH_STORAGE_KEYS.accessToken);
 }
 
+function storeAuthTokens(accessToken: string, refreshToken: string): void {
+  localStorage.setItem(AUTH_STORAGE_KEYS.accessToken, accessToken);
+  localStorage.setItem(AUTH_STORAGE_KEYS.refreshToken, refreshToken);
+}
+
 export function getStoredUser(): LoginResponse['user'] | null {
   return safeJsonParse<LoginResponse['user']>(localStorage.getItem(AUTH_STORAGE_KEYS.user));
 }
@@ -102,8 +111,7 @@ export function getStoredAgentType(): string | null {
 }
 
 export function storeAuthSession(response: LoginResponse): void {
-  localStorage.setItem(AUTH_STORAGE_KEYS.accessToken, response.access_token);
-  localStorage.setItem(AUTH_STORAGE_KEYS.refreshToken, response.refresh_token);
+  storeAuthTokens(response.access_token, response.refresh_token);
   localStorage.setItem(AUTH_STORAGE_KEYS.user, JSON.stringify(response.user));
   localStorage.setItem(AUTH_STORAGE_KEYS.roles, JSON.stringify(response.roles ?? []));
   localStorage.setItem(AUTH_STORAGE_KEYS.agentType, response.agentType ?? '');
@@ -125,6 +133,17 @@ export async function syncSupabaseAuthSession(
   if (error) {
     console.warn('[api] Could not sync Supabase auth session:', error.message);
   }
+}
+
+async function refreshStoredAuthSession(): Promise<boolean> {
+  const { data, error } = await supabase.auth.getSession();
+  const session = data.session;
+  if (error || !session?.access_token || !session.refresh_token) {
+    return false;
+  }
+
+  storeAuthTokens(session.access_token, session.refresh_token);
+  return true;
 }
 
 export function clearAuthStorage(): void {
@@ -183,7 +202,8 @@ export function logout(options: { redirect?: boolean } = {}): void {
   }
 }
 
-export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}): Promise<Response> {
+  const { logoutOnUnauthorized = true, ...fetchInit } = init;
   const headers = new Headers(init.headers);
   const token = getAccessToken();
   if (token && !headers.has('Authorization')) {
@@ -195,9 +215,21 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
       ? authUrl(input)
       : input;
 
-  const res = await fetch(url, { ...init, headers });
+  let res = await fetch(url, { ...fetchInit, headers });
   if (res.status === 401) {
-    logout();
+    const refreshed = await refreshStoredAuthSession();
+    if (refreshed) {
+      const retryHeaders = new Headers(fetchInit.headers);
+      const refreshedToken = getAccessToken();
+      if (refreshedToken && !retryHeaders.has('Authorization')) {
+        retryHeaders.set('Authorization', `Bearer ${refreshedToken}`);
+      }
+      res = await fetch(url, { ...fetchInit, headers: retryHeaders });
+    }
+
+    if (res.status === 401 && logoutOnUnauthorized) {
+      logout();
+    }
   }
   return res;
 }

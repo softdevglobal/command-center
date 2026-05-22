@@ -72,6 +72,7 @@ function bmsHeaders(ownerUid?: string | null): Headers {
 async function bmsFetch(path: string, ownerUid?: string | null): Promise<Response> {
   return apiFetch(bmsUrl(path), {
     headers: bmsHeaders(ownerUid),
+    logoutOnUnauthorized: false,
   });
 }
 
