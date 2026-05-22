@@ -1027,7 +1027,9 @@ export async function fetchInternalChatAgents(): Promise<Agent[]> {
   return fetchInternalChatAgentsFromSupabase();
 }
 
-export async function fetchInternalConversations(currentAgentId: string): Promise<InternalChatConversation[]> {
+export async function fetchInternalConversations(
+  currentAgentId?: string | null,
+): Promise<InternalChatConversation[]> {
   const res = await authorizedFetchAgentChat('/conversations');
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
@@ -1124,7 +1126,11 @@ export async function markInternalConversationAllRead(conversationId: string): P
   }
 }
 
-export async function sendInternalMessage(conversationId: string, senderId: string, content: string): Promise<void> {
+export async function sendInternalMessage(
+  conversationId: string,
+  senderId: string | null | undefined,
+  content: string,
+): Promise<void> {
   void senderId;
   const res = await authorizedFetchAgentChat(
     `/conversations/${encodeURIComponent(conversationId)}/messages`,
@@ -1139,7 +1145,10 @@ export async function sendInternalMessage(conversationId: string, senderId: stri
   }
 }
 
-export async function getOrCreateInternalConversation(agentIdA: string, agentIdB: string): Promise<string> {
+export async function getOrCreateInternalConversation(
+  agentIdA: string | null | undefined,
+  agentIdB: string,
+): Promise<string> {
   void agentIdA;
   const res = await authorizedFetchAgentChat('/conversations', {
     method: 'POST',

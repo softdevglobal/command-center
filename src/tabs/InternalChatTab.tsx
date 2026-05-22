@@ -65,7 +65,7 @@ function resolveConversationDisplay(
 ): { title: string; subtitle: string; isOversight: boolean } {
   if (!isSuperAdmin || (!conv.agentA && !conv.agentB)) {
     return {
-      title: conv.otherParticipant?.name ?? 'Unknown',
+      title: conv.otherParticipant?.name ?? 'Internal conversation',
       subtitle: conv.otherParticipant?.status ?? 'offline',
       isOversight: false,
     };
@@ -295,15 +295,10 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
   // Load conversations
   const loadConversations = useCallback(async () => {
     if (rosterLoading && !isSuperAdmin) return;
-    if (!messagingAgentId && !isSuperAdmin) {
-      setConversations([]);
-      setLoading(false);
-      return;
-    }
     try {
       const data = isSuperAdmin 
         ? await fetchAllInternalConversations() 
-        : await fetchInternalConversations(messagingAgentId!);
+        : await fetchInternalConversations(messagingAgentId);
       setConversations(
         data.map((conv) =>
           hydrateConversationParticipants(conv, agentsById, messagingAgentId),
@@ -392,12 +387,14 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
   );
 
   const canSendInSelectedConv = useMemo(() => {
-    if (!selectedConv || !messagingAgentId) return false;
+    if (!selectedConv) return false;
+    if (!isSuperAdmin) return true;
+    if (!messagingAgentId) return false;
     return (
       selectedConv.participant_a === messagingAgentId ||
       selectedConv.participant_b === messagingAgentId
     );
-  }, [selectedConv, messagingAgentId]);
+  }, [selectedConv, isSuperAdmin, messagingAgentId]);
 
   const filteredConversations = useMemo(() => {
     let list = conversations;
@@ -430,11 +427,9 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
   ]);
 
   const handleStartChat = useCallback(async (targetAgentId: string) => {
-    if (!messagingAgentId) {
+    if (isSuperAdmin && !messagingAgentId) {
       setComposeError(
-        isSuperAdmin
-          ? 'Link a command centre agent profile to your super admin account (Agents tab) to send messages.'
-          : 'Your login is not linked to an agent profile. Ask an admin to link your account.',
+        'Link a command centre agent profile to your super admin account (Agents tab) to send messages.',
       );
       return;
     }
@@ -457,11 +452,9 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
   const { pendingInternalChatAgentId, setPendingInternalChatAgentId } = useDashboard();
   useEffect(() => {
     if (!pendingInternalChatAgentId) return;
-    if (!messagingAgentId) {
+    if (isSuperAdmin && !messagingAgentId) {
       setComposeError(
-        isSuperAdmin
-          ? 'Link a command centre agent profile to your account before messaging agents.'
-          : 'Your login is not linked to an agent profile. Ask an admin to link your account.',
+        'Link a command centre agent profile to your account before messaging agents.',
       );
       return;
     }
@@ -477,7 +470,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!draft.trim() || !selectedConvId || !messagingAgentId) return;
+    if (!draft.trim() || !selectedConvId) return;
     if (!canSendInSelectedConv) return;
 
     const content = draft.trim();
@@ -600,19 +593,13 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
             </div>
           )}
 
-          {!isSuperAdmin && !rosterLoading && !currentAgent && (
-            <div className="text-xs text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mb-3">
-              Your login is not linked to a command centre agent profile yet.
-            </div>
-          )}
-
           {rosterError && (
             <div className="text-xs text-rose-700 bg-rose-50 border border-rose-100 rounded-xl px-3 py-2 mb-3">
               {rosterError}
             </div>
           )}
 
-          {(isSuperAdmin ? messagingAgentId : currentAgent) && (
+          {(isSuperAdmin ? messagingAgentId : commandCentreAgents.length > 0) && (
             <div className="space-y-1.5">
               <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
                 {isSuperAdmin ? 'Message command centre admin' : 'Quick Message'}
@@ -838,7 +825,7 @@ export function InternalChatTab({ session, permissions }: InternalChatTabProps) 
               </div>
             </ScrollArea>
 
-            {messagingAgentId && canSendInSelectedConv && (
+            {canSendInSelectedConv && (
               <div className="p-4 bg-white border-t border-slate-100">
                 <form onSubmit={handleSendMessage} className="flex items-center gap-2">
                   <div className="flex-1 relative">
