@@ -11,6 +11,7 @@ import {
   fetchSalesSiteVisitsTenant,
   fetchSalesSuburbs,
   fetchSalesSuburbWorkshopAgentContactTenant,
+  fetchSalesSuburbWorkshopsAllTenants,
   fetchSalesSuburbWorkshopsTenant,
   fetchSalesTrialsTenant,
   insertSalesLead,
@@ -603,9 +604,11 @@ export function SalesAgentSuburbAssignmentTab({
   tenantId,
   agents,
   queues: _queues,
+  permissions,
   onRefreshDashboard,
 }: SalesAdminTabProps) {
   void _queues;
+  const isSuperAdmin = permissions.canSwitchTenant;
   const { roster, loading: pickerLoading } = useAgentsFullPickerRoster(agents);
   const [rows, setRows] = useState<Awaited<ReturnType<typeof fetchSalesSuburbs>>>(
     [],
@@ -620,14 +623,16 @@ export function SalesAgentSuburbAssignmentTab({
     try {
       const [assignRows, wsRows] = await Promise.all([
         fetchSalesSuburbs(tid),
-        fetchSalesSuburbWorkshopsTenant(tid),
+        isSuperAdmin
+          ? fetchSalesSuburbWorkshopsAllTenants()
+          : fetchSalesSuburbWorkshopsTenant(tid),
       ]);
       setRows(assignRows);
       setWorkshops(wsRows);
     } finally {
       setLoadingTable(false);
     }
-  }, []);
+  }, [isSuperAdmin]);
 
   useEffect(() => {
     if (!tenantId) return;
@@ -642,21 +647,15 @@ export function SalesAgentSuburbAssignmentTab({
   }, [roster]);
 
   const suburbChoices = useMemo(() => {
-    const assigned = new Set(
-      rows
-        .filter((r) => r.agent_id === agentId)
-        .map((r) => normalizeSalesSuburbKey(r.suburb)),
-    );
     const canonicalByNorm = new Map<string, string>();
     for (const w of workshops) {
       const k = normalizeSalesSuburbKey(w.suburb);
       if (!canonicalByNorm.has(k)) canonicalByNorm.set(k, w.suburb.trim());
     }
-    return [...canonicalByNorm.entries()]
-      .filter(([k]) => !assigned.has(k))
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([, label]) => label);
-  }, [workshops, rows, agentId]);
+    return [...canonicalByNorm.values()].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: "base" }),
+    );
+  }, [workshops]);
 
   useEffect(() => {
     setPickedSuburb((prev) =>
@@ -714,18 +713,14 @@ export function SalesAgentSuburbAssignmentTab({
               <Select
                 value={pickedSuburb || undefined}
                 onValueChange={setPickedSuburb}
-                disabled={
-                  pickerLoading || workshops.length === 0 || suburbChoices.length === 0
-                }
+                disabled={pickerLoading || suburbChoices.length === 0}
               >
                 <SelectTrigger>
                   <SelectValue
                     placeholder={
-                      workshops.length === 0
+                      suburbChoices.length === 0
                         ? "Add workshops first (Suburb workshops tab)"
-                        : suburbChoices.length === 0
-                          ? "Agent already has all workshop suburbs"
-                          : "Choose suburb..."
+                        : "Choose suburb..."
                     }
                   />
                 </SelectTrigger>
@@ -861,6 +856,8 @@ export function SalesAgentSuburbAssignmentTab({
 
 export function SalesSuburbWorkshopsTab({
   tenantId,
+  tenants,
+  permissions,
   onRefreshDashboard,
 }: SalesAdminTabProps) {
   const [rows, setRows] = useState<SalesSuburbWorkshopRow[]>([]);
@@ -875,18 +872,33 @@ export function SalesSuburbWorkshopsTab({
   const [website, setWebsite] = useState("");
   const [saving, setSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [formTenantId, setFormTenantId] = useState<string>("");
+  const showingAllTenants = permissions.canSwitchTenant && !tenantId;
+  const tenantNameById = useMemo(
+    () => new Map(tenants.map((t) => [t.id, t.name] as const)),
+    [tenants],
+  );
 
-  const load = useCallback(async (tid: string) => {
+  useEffect(() => {
+    if (showingAllTenants && tenants.length > 0 && !formTenantId) {
+      setFormTenantId(tenants[0].id);
+    }
+  }, [showingAllTenants, tenants, formTenantId]);
+
+  const load = useCallback(async (tid: string | null) => {
     setLoadingTable(true);
     try {
-      setRows(await fetchSalesSuburbWorkshopsTenant(tid));
+      setRows(
+        tid
+          ? await fetchSalesSuburbWorkshopsTenant(tid)
+          : await fetchSalesSuburbWorkshopsAllTenants(),
+      );
     } finally {
       setLoadingTable(false);
     }
   }, []);
 
   useEffect(() => {
-    if (!tenantId) return;
     void load(tenantId);
   }, [tenantId, load]);
 
@@ -950,9 +962,11 @@ export function SalesSuburbWorkshopsTab({
     return sortedWsRows.filter(
       (w) =>
         (w.workshop_name && w.workshop_name.toLowerCase().includes(q)) ||
-        (w.phone_number && w.phone_number.toLowerCase().includes(q))
+        (w.phone_number && w.phone_number.toLowerCase().includes(q)) ||
+        (w.suburb && w.suburb.toLowerCase().includes(q)) ||
+        (tenantNameById.get(w.tenant_id) ?? "").toLowerCase().includes(q)
     );
-  }, [sortedWsRows, searchQuery]);
+  }, [sortedWsRows, searchQuery, tenantNameById]);
 
   const duplicateWarning = useMemo(() => {
     if (!workshopName.trim() && !phoneNumber.trim()) return null;
@@ -997,6 +1011,13 @@ export function SalesSuburbWorkshopsTab({
   }
 
   function submitWorkshop(tid: string) {
+    const effectiveTenantId = showingAllTenants ? formTenantId : tid;
+
+    if (!effectiveTenantId) {
+      toast.error("Please select a client before saving.");
+      return;
+    }
+
     const isDuplicate = rows.some(
       (r) =>
         r.id !== editingId &&
@@ -1030,11 +1051,11 @@ export function SalesSuburbWorkshopsTab({
       ? updateSalesSuburbWorkshop(editingId, payload).then(async () => {
           toast.success("Workshop saved");
           resetForm();
-          await load(tid);
+          await load(tenantId);
           onRefreshDashboard();
         })
       : insertSalesSuburbWorkshop({
-          tenantId: tid,
+          tenantId: effectiveTenantId,
           ...payload,
         }).then(async () => {
           toast.success(
@@ -1043,7 +1064,7 @@ export function SalesSuburbWorkshopsTab({
               : `This suburb now has ${countAfter} workshops - suburb stays filled.`,
           );
           partialResetKeepSuburb(subKeep);
-          await load(tid);
+          await load(tenantId);
           onRefreshDashboard();
         });
     void req.catch((e) => {
@@ -1053,13 +1074,14 @@ export function SalesSuburbWorkshopsTab({
   }
 
   return (
-    <SalesTenantScope tenantId={tenantId}>
+    <SalesTenantScope tenantId={showingAllTenants ? "__all__" : tenantId}>
       {(tid) => (
         <div className="space-y-4">
           <div>
             <h2 className="text-lg font-semibold">Suburb workshops</h2>
             <p className="text-sm text-muted-foreground">
               Log as many workshops as you need against the same suburb (each row is one site/dealer card). Reuse suburb spelling exactly as on CRM leads - case does not matter. Agents mapped to that suburb see every workshop here.
+              {showingAllTenants ? " You are viewing all clients — select a client in the form below to add new workshops." : ""}
             </p>
           </div>
           {rows.length > 0 ? (
@@ -1180,7 +1202,7 @@ export function SalesSuburbWorkshopsTab({
                 <Button
                   type="button"
                   className="min-h-11 min-w-[10rem] font-semibold shadow-sm"
-                  disabled={saving || !suburb.trim() || !workshopName.trim() || !!duplicateWarning}
+                  disabled={saving || !suburb.trim() || !workshopName.trim() || !!duplicateWarning || (showingAllTenants && !formTenantId)}
                   onClick={() => submitWorkshop(tid)}
                 >
                   {saving ? "Saving..." : editingId ? "Save changes" : "Save workshop"}
@@ -1213,6 +1235,7 @@ export function SalesSuburbWorkshopsTab({
               <Table>
                 <TableHeader>
                   <TableRow>
+                    {showingAllTenants ? <TableHead>Client</TableHead> : null}
                     <TableHead>Suburb</TableHead>
                     <TableHead>Workshop</TableHead>
                     <TableHead>Phone</TableHead>
@@ -1232,6 +1255,11 @@ export function SalesSuburbWorkshopsTab({
 
                     return (
                       <TableRow key={r.id}>
+                        {showingAllTenants ? (
+                          <TableCell className="text-sm">
+                            {tenantNameById.get(r.tenant_id) ?? r.tenant_id}
+                          </TableCell>
+                        ) : null}
                         <TableCell
                           className={
                             grouped ? "border-l-4 border-muted pl-4" : ""
@@ -1278,7 +1306,7 @@ export function SalesSuburbWorkshopsTab({
                             void deleteSalesSuburbWorkshop(r.id).then(async () => {
                               toast.success("Removed");
                               if (editingId === r.id) resetForm();
-                              await load(tid);
+                              await load(tenantId);
                               onRefreshDashboard();
                             }).catch(() => toast.error("Could not remove"));
                           }}
@@ -1291,7 +1319,7 @@ export function SalesSuburbWorkshopsTab({
                   })}
                   {rows.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={6}>
+                      <TableCell colSpan={showingAllTenants ? 7 : 6}>
                         <EmptyState message="Add the first workshop row. Reuse the same suburb name for additional sites in that area." />
                       </TableCell>
                     </TableRow>

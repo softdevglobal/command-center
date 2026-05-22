@@ -283,6 +283,17 @@ export async function fetchSalesSuburbWorkshopsTenant(
   return data ?? [];
 }
 
+/** Super admin / tenant staff scope via RLS. */
+export async function fetchSalesSuburbWorkshopsAllTenants(): Promise<SalesSuburbWorkshopRow[]> {
+  const { data, error } = await supabase
+    .from("sales_suburb_workshops")
+    .select("*")
+    .order("tenant_id", { ascending: true })
+    .order("suburb", { ascending: true });
+  if (error) throw error;
+  return data ?? [];
+}
+
 /** Assigned suburbs only — RLS. */
 export async function fetchSalesSuburbWorkshopsMine(): Promise<SalesSuburbWorkshopRow[]> {
   const { data, error } = await supabase.from("sales_suburb_workshops").select("*").order("suburb", { ascending: true });
