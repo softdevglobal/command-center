@@ -181,6 +181,7 @@ export async function login(email: string, password: string): Promise<LoginRespo
 
 export async function getMe(): Promise<MeResponse> {
   const res = await apiFetch('/auth/me', {
+    logoutOnUnauthorized: true,
     headers: {
       Accept: 'application/json',
     },
@@ -203,7 +204,7 @@ export function logout(options: { redirect?: boolean } = {}): void {
 }
 
 export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}): Promise<Response> {
-  const { logoutOnUnauthorized = true, ...fetchInit } = init;
+  const { logoutOnUnauthorized = false, ...fetchInit } = init;
   const headers = new Headers(init.headers);
   const token = getAccessToken();
   if (token && !headers.has('Authorization')) {
