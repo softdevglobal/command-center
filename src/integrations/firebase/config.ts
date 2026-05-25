@@ -6,12 +6,20 @@ import { getAuth } from 'firebase/auth';
  * Add these to your .env file (see the placeholder block at the bottom of .env).
  */
 const firebaseConfig = {
-  apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId:         import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket:     import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId:             import.meta.env.VITE_FIREBASE_APP_ID,
+  apiKey:
+    import.meta.env.VITE_FIREBASE_API_KEY ||
+    'AIzaSyBh9yN2w_f6aF1nG8_dWM29ixRJVn9sqoM',
+  authDomain:
+    import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'bmspro-black.firebaseapp.com',
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || 'bmspro-black',
+  storageBucket:
+    import.meta.env.VITE_FIREBASE_STORAGE_BUCKET ||
+    'bmspro-black.firebasestorage.app',
+  messagingSenderId:
+    import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '807442450614',
+  appId:
+    import.meta.env.VITE_FIREBASE_APP_ID ||
+    '1:807442450614:web:6df4fcda16b65b6860fe17',
 };
 
 // Avoid re-initialising on HMR hot-reload

@@ -18,7 +18,7 @@ export default defineConfig(({ mode }) => ({
     /** Proxy local `/api/*` development calls to the Command Center backend. */
     proxy: {
       "/api": {
-        target: "http://13.236.183.142:5050",
+        target: "http://localhost:5050",
         changeOrigin: true,
         secure: false,
       },
