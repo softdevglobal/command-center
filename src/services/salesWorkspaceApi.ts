@@ -20,10 +20,17 @@ export type SalesSuburbWorkshopContactRow =
   Database["public"]["Tables"]["sales_suburb_workshop_agent_contact"]["Row"];
 /** Workshop directory row plus this agent’s call/remarks from `sales_suburb_workshop_agent_contact`. */
 export type SalesSuburbWorkshopWithAgentContact = SalesSuburbWorkshopRow & {
+  agent_contact_id: string | null;
   agent_first_called_at: string | null;
   agent_remarks: string;
   agent_follow_up_at: string | null;
   agent_call_status: string | null;
+};
+
+export type FetchSalesSuburbWorkshopsWithAgentContactOptions = {
+  agentId?: string | null;
+  tenantId?: string | null;
+  userId?: string | null;
 };
 
 /** Match workshop rows to suburb strings on leads and assignments */
@@ -246,16 +253,11 @@ export async function fetchSalesSuburbs(tenantId: string): Promise<SalesSuburbRo
 }
 
 /** Agent-facing: rows for this agent profile (RLS limits to own agent_id). */
-export async function fetchAgentSuburbsAssigned(agentId: string): Promise<SalesSuburbRow[]> {
-  const agentKey = agentId.trim();
-  const raw = await requestSalesSuburbAssignments("GET", { agentId: agentKey });
+export async function fetchAgentSuburbsAssigned(): Promise<SalesSuburbRow[]> {
+  const raw = await requestSalesSuburbAssignments("GET");
   const rows = extractAssignmentRows(raw)
     .map(rowToSalesSuburbAssignment)
-    .filter(
-      (row) =>
-        Boolean(row.id) &&
-        (!agentKey || !row.agent_id || row.agent_id === agentKey),
-    );
+    .filter((row) => Boolean(row.id));
   return sortSalesSuburbAssignments(rows);
 }
 
@@ -324,6 +326,15 @@ export async function fetchSalesSuburbWorkshopsTenant(
   return sortSalesSuburbWorkshops(rows);
 }
 
+/** Admin scope — all tenants visible to the API caller. */
+export async function fetchSalesSuburbWorkshopsAllTenants(): Promise<SalesSuburbWorkshopRow[]> {
+  const raw = await requestSalesSuburbWorkshops("GET");
+  const rows = extractWorkshopRows(raw)
+    .map(rowToSalesSuburbWorkshop)
+    .filter((row) => Boolean(row.id));
+  return sortSalesSuburbWorkshops(rows);
+}
+
 /** Assigned suburbs only — RLS. */
 export async function fetchSalesSuburbWorkshopsMine(): Promise<SalesSuburbWorkshopRow[]> {
   const raw = await requestSalesSuburbWorkshops("GET");
@@ -333,36 +344,75 @@ export async function fetchSalesSuburbWorkshopsMine(): Promise<SalesSuburbWorksh
   return sortSalesSuburbWorkshops(rows);
 }
 
-export async function fetchSalesSuburbWorkshopContactMine(): Promise<SalesSuburbWorkshopContactRow[]> {
-  const { data, error } = await supabase.from("sales_suburb_workshop_agent_contact").select("*");
-  if (error) throw error;
-  return data ?? [];
-}
-
-/** Super admin / tenant staff: every agent workshop touch row for CRM reporting (RLS). */
+/** Super admin / tenant staff: every agent workshop touch row for CRM reporting.
+ *  Hits `GET /api/sales-suburb-workshop-agent-contacts` (no filter) and narrows by tenant
+ *  client-side so admins see every agent's activity for the selected tenant.
+ *  If the tenant filter would empty out the results (e.g. backend doesn't return
+ *  tenant_id yet), we fall back to all rows so the admin can still see activity. */
 export async function fetchSalesSuburbWorkshopAgentContactTenant(
   tenantId: string,
 ): Promise<SalesSuburbWorkshopContactRow[]> {
-  const { data, error } = await supabase
-    .from("sales_suburb_workshop_agent_contact")
-    .select("*")
-    .eq("tenant_id", tenantId)
-    .order("updated_at", { ascending: false });
-  if (error) throw error;
-  return data ?? [];
+  const tenantKey = tenantId.trim();
+  const all = await fetchSalesSuburbWorkshopAgentContactsMine();
+  const matching = tenantKey
+    ? all.filter((r) => r.tenant_id === tenantKey)
+    : all;
+  const rows = matching.length > 0 ? matching : all;
+
+  return rows.slice().sort((a, b) => {
+    const ta = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+    const tb = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+    return tb - ta;
+  });
 }
 
-/** Workshops visible to the agent plus per-agent first call time and remarks. */
-export async function fetchSalesSuburbWorkshopsWithAgentContact(): Promise<SalesSuburbWorkshopWithAgentContact[]> {
-  const [workshops, contacts] = await Promise.all([
-    fetchSalesSuburbWorkshopsMine(),
-    fetchSalesSuburbWorkshopContactMine().catch(() => [] as SalesSuburbWorkshopContactRow[]),
-  ]);
-  const byWorkshop = new Map(contacts.map((c) => [c.workshop_id, c] as const));
-  return workshops.map((w) => {
+async function resolveSalesAgentScope(
+  options: FetchSalesSuburbWorkshopsWithAgentContactOptions,
+): Promise<{ agentId: string | null; tenantId: string | null }> {
+  let agentId = options.agentId?.trim() || null;
+  let tenantId = options.tenantId?.trim() || null;
+  const userId = options.userId?.trim();
+
+  if ((!agentId || !tenantId) && userId) {
+    const { data, error } = await supabase
+      .from("agents")
+      .select("id, tenant_id")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error) throw new Error(formatSupabaseError(error));
+    agentId = agentId ?? data?.id ?? null;
+    tenantId = tenantId ?? data?.tenant_id ?? null;
+  }
+
+  return { agentId, tenantId };
+}
+
+/** Workshops + per-agent overlays both come from the backend REST API
+ *  (`/api/sales-suburb-workshops` and `/api/sales-suburb-workshop-agent-contacts`). */
+export async function fetchSalesSuburbWorkshopsWithAgentContact(
+  options: FetchSalesSuburbWorkshopsWithAgentContactOptions = {},
+): Promise<SalesSuburbWorkshopWithAgentContact[]> {
+  const { agentId, tenantId } = await resolveSalesAgentScope(options);
+
+  const workshopsPromise = (tenantId
+    ? fetchSalesSuburbWorkshopsTenant(tenantId)
+    : fetchSalesSuburbWorkshopsAllTenants()
+  ).catch(() => [] as SalesSuburbWorkshopRow[]);
+
+  const contactsPromise = fetchSalesSuburbWorkshopAgentContactsMine({
+    agentId,
+    tenantId,
+  }).catch(() => [] as SalesSuburbWorkshopContactRow[]);
+
+  const [workshops, contacts] = await Promise.all([workshopsPromise, contactsPromise]);
+
+  const scopedContacts = agentId ? contacts.filter((c) => c.agent_id === agentId) : contacts;
+  const byWorkshop = new Map(scopedContacts.map((c) => [c.workshop_id, c] as const));
+  return sortSalesSuburbWorkshops(workshops).map((w) => {
     const c = byWorkshop.get(w.id);
     return {
       ...w,
+      agent_contact_id: c?.id ?? null,
       agent_first_called_at: c?.first_called_at ?? null,
       agent_remarks: c?.remarks ?? "",
       agent_follow_up_at: c?.follow_up_at ?? null,
@@ -409,7 +459,7 @@ function rowToSalesSuburbAssignment(raw: unknown): SalesSuburbRow {
     id: pickString(row, ["id", "assignmentId", "assignment_id"]),
     tenant_id: pickString(row, ["tenant_id", "tenantId"]),
     agent_id: pickString(row, ["agent_id", "agentId"]),
-    suburb: pickString(row, ["suburb"]),
+    suburb: pickString(row, ["suburb", "suburbName", "suburb_name", "name"]),
     created_at: pickString(row, ["created_at", "createdAt"]),
   };
 }
@@ -430,9 +480,12 @@ function extractAssignmentRows(raw: unknown): unknown[] {
   const body = asRecord(raw);
   for (const key of [
     "assignments",
+    "assignedSuburbs",
+    "suburbs",
     "salesAgentSuburbAssignments",
     "sales_agent_suburb_assignments",
     "items",
+    "rows",
     "results",
     "data",
   ] as const) {
@@ -441,7 +494,7 @@ function extractAssignmentRows(raw: unknown): unknown[] {
   }
 
   const data = asRecord(body.data);
-  for (const key of ["assignments", "items", "results"] as const) {
+  for (const key of ["assignments", "assignedSuburbs", "suburbs", "items", "rows", "results"] as const) {
     const value = data[key];
     if (Array.isArray(value)) return value;
   }
@@ -635,6 +688,156 @@ async function requestSalesSuburbAssignments(
   return parseJsonBody(res);
 }
 
+async function requestSalesSuburbWorkshopAgentContacts(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  options: {
+    id?: string;
+    tenantId?: string | null;
+    agentId?: string | null;
+    workshopId?: string | null;
+    body?: unknown;
+  } = {},
+): Promise<unknown> {
+  const id = options.id?.trim();
+  const search = new URLSearchParams();
+  const tenantId = options.tenantId?.trim();
+  const agentId = options.agentId?.trim();
+  const workshopId = options.workshopId?.trim();
+  if (tenantId) search.set("tenantId", tenantId);
+  if (agentId) search.set("agentId", agentId);
+  if (workshopId) search.set("workshopId", workshopId);
+
+  const endpoint = `/sales-suburb-workshop-agent-contacts${
+    id ? `/${encodeURIComponent(id)}` : ""
+  }${search.size > 0 ? `?${search.toString()}` : ""}`;
+
+  const headers = new Headers({ Accept: "application/json" });
+  if (options.body !== undefined) headers.set("Content-Type", "application/json");
+
+  const res = await apiFetch(endpoint, {
+    method,
+    headers,
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+  });
+
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `Sales suburb workshop agent contacts API ${method} failed: ${res.status}${
+        detail ? ` - ${detail}` : ""
+      }`,
+    );
+  }
+
+  return parseJsonBody(res);
+}
+
+function pickNullableString(
+  row: Record<string, unknown>,
+  keys: readonly string[],
+): string | null {
+  for (const key of keys) {
+    const value = row[key];
+    if (value === null) return null;
+    if (value === undefined) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+function rowToSalesSuburbWorkshopAgentContact(
+  raw: unknown,
+): SalesSuburbWorkshopContactRow {
+  const row = asRecord(raw);
+  return {
+    id: pickString(row, ["id", "contactId", "contact_id"]),
+    agent_id: pickString(row, ["agent_id", "agentId"]),
+    tenant_id: pickString(row, ["tenant_id", "tenantId"]),
+    workshop_id: pickString(row, ["workshop_id", "workshopId"]),
+    first_called_at: pickNullableString(row, [
+      "first_called_at",
+      "firstCalledAt",
+    ]),
+    remarks: pickString(row, ["remarks", "notes"]),
+    follow_up_at: pickNullableString(row, ["follow_up_at", "followUpAt"]),
+    call_status: pickNullableString(row, ["call_status", "callStatus"]),
+    created_at: pickString(row, ["created_at", "createdAt"]),
+    updated_at: pickString(row, ["updated_at", "updatedAt"]),
+  };
+}
+
+function extractContactRows(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+
+  const body = asRecord(raw);
+  for (const key of [
+    "contacts",
+    "salesSuburbWorkshopAgentContacts",
+    "sales_suburb_workshop_agent_contacts",
+    "items",
+    "rows",
+    "results",
+    "data",
+  ] as const) {
+    const value = body[key];
+    if (Array.isArray(value)) return value;
+  }
+
+  const data = asRecord(body.data);
+  for (const key of ["contacts", "items", "rows", "results"] as const) {
+    const value = data[key];
+    if (Array.isArray(value)) return value;
+  }
+
+  return [];
+}
+
+function extractContactRow(raw: unknown): unknown {
+  const body = asRecord(raw);
+  for (const key of [
+    "contact",
+    "salesSuburbWorkshopAgentContact",
+    "sales_suburb_workshop_agent_contact",
+    "item",
+    "result",
+    "data",
+  ] as const) {
+    const value = body[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  }
+  return body;
+}
+
+/** Agent-facing list. RLS / auth on the backend restricts to the caller's contacts. */
+export async function fetchSalesSuburbWorkshopAgentContactsMine(
+  filters: { agentId?: string | null; tenantId?: string | null; workshopId?: string | null } = {},
+): Promise<SalesSuburbWorkshopContactRow[]> {
+  const raw = await requestSalesSuburbWorkshopAgentContacts("GET", {
+    agentId: filters.agentId ?? undefined,
+    tenantId: filters.tenantId ?? undefined,
+    workshopId: filters.workshopId ?? undefined,
+  });
+  return extractContactRows(raw)
+    .map(rowToSalesSuburbWorkshopAgentContact)
+    .filter((row) => Boolean(row.id));
+}
+
+export async function fetchSalesSuburbWorkshopAgentContactById(
+  contactId: string,
+): Promise<SalesSuburbWorkshopContactRow | null> {
+  const id = contactId.trim();
+  if (!id) return null;
+  try {
+    const raw = await requestSalesSuburbWorkshopAgentContacts("GET", { id });
+    const contact = rowToSalesSuburbWorkshopAgentContact(extractContactRow(raw));
+    return contact.id ? contact : null;
+  } catch (err) {
+    if (err instanceof Error && /\b404\b/.test(err.message)) return null;
+    throw err;
+  }
+}
+
 function toSalesSuburbAssignmentPayload(row: {
   tenantId?: string;
   agentId?: string;
@@ -721,45 +924,85 @@ export async function deleteSalesSuburbWorkshop(id: string): Promise<void> {
   await requestSalesSuburbWorkshops("DELETE", { id });
 }
 
-export async function markSalesSuburbWorkshopCalled(workshopId: string): Promise<void> {
-  const { error } = await supabase.rpc("mark_sales_suburb_workshop_called", {
-    p_workshop_id: workshopId,
+type SalesWorkshopAgentContactPatch = {
+  firstCalledAt?: string | null;
+  remarks?: string;
+  followUpAt?: string | null;
+  callStatus?: "confirmed" | "rejected" | null;
+};
+
+async function upsertSalesSuburbWorkshopAgentContact(opts: {
+  workshopId: string;
+  contactId?: string | null;
+  tenantId?: string | null;
+  patch: SalesWorkshopAgentContactPatch;
+}): Promise<SalesSuburbWorkshopContactRow> {
+  const contactId = opts.contactId?.trim() || null;
+  const workshopId = opts.workshopId.trim();
+  const tenantId = opts.tenantId?.trim() || null;
+
+  const raw = contactId
+    ? await requestSalesSuburbWorkshopAgentContacts("PATCH", {
+        id: contactId,
+        body: opts.patch,
+      })
+    : await requestSalesSuburbWorkshopAgentContacts("POST", {
+        body: {
+          workshopId,
+          ...(tenantId ? { tenantId } : {}),
+          ...opts.patch,
+        },
+      });
+
+  return rowToSalesSuburbWorkshopAgentContact(extractContactRow(raw));
+}
+
+export async function markSalesSuburbWorkshopCalled(
+  workshopId: string,
+  contactId?: string | null,
+): Promise<SalesSuburbWorkshopContactRow> {
+  return upsertSalesSuburbWorkshopAgentContact({
+    workshopId,
+    contactId,
+    patch: { firstCalledAt: new Date().toISOString() },
   });
-  if (error) throw new Error(formatSupabaseError(error));
 }
 
 export async function updateSalesSuburbWorkshopAgentRemarks(
   workshopId: string,
   remarks: string,
-): Promise<void> {
-  const { error } = await supabase.rpc("update_sales_suburb_workshop_remarks", {
-    p_workshop_id: workshopId,
-    p_remarks: remarks,
+  contactId?: string | null,
+): Promise<SalesSuburbWorkshopContactRow> {
+  return upsertSalesSuburbWorkshopAgentContact({
+    workshopId,
+    contactId,
+    patch: { remarks },
   });
-  if (error) throw new Error(formatSupabaseError(error));
 }
 
 export async function setSalesSuburbWorkshopFollowUp(
   workshopId: string,
   followUpAtIso: string | null,
-): Promise<void> {
-  const { error } = await supabase.rpc("set_sales_suburb_workshop_follow_up", {
-    p_workshop_id: workshopId,
-    p_follow_up_at: followUpAtIso,
+  contactId?: string | null,
+): Promise<SalesSuburbWorkshopContactRow> {
+  return upsertSalesSuburbWorkshopAgentContact({
+    workshopId,
+    contactId,
+    patch: { followUpAt: followUpAtIso },
   });
-  if (error) throw new Error(formatSupabaseError(error));
 }
 
 /** Set or clear the agent's call outcome (confirmed / rejected / null) for a suburb workshop. */
 export async function setSalesSuburbWorkshopCallStatus(
   workshopId: string,
   status: "confirmed" | "rejected" | null,
-): Promise<void> {
-  const { error } = await supabase.rpc("set_sales_suburb_workshop_call_status", {
-    p_workshop_id: workshopId,
-    p_status: status,
+  contactId?: string | null,
+): Promise<SalesSuburbWorkshopContactRow> {
+  return upsertSalesSuburbWorkshopAgentContact({
+    workshopId,
+    contactId,
+    patch: { callStatus: status },
   });
-  if (error) throw new Error(formatSupabaseError(error));
 }
 
 export function journeysRank(s: LeadJourneyStage): number {

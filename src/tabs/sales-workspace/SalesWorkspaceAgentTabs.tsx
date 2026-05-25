@@ -239,7 +239,7 @@ function SuburbWorkshopsTable({
                               onValueChange={(val) => {
                                 if (val === "confirmed" || val === "rejected") {
                                   setSavingStatusId(w.id);
-                                  void setSalesSuburbWorkshopCallStatus(w.id, val)
+                                  void setSalesSuburbWorkshopCallStatus(w.id, val, w.agent_contact_id)
                                     .then(async () => {
                                       toast.success(
                                         val === "confirmed" ? "Marked as confirmed" : "Marked as rejected",
@@ -281,7 +281,7 @@ function SuburbWorkshopsTable({
                             disabled={markingId === w.id}
                             onClick={() => {
                               setMarkingId(w.id);
-                              void markSalesSuburbWorkshopCalled(w.id)
+                              void markSalesSuburbWorkshopCalled(w.id, w.agent_contact_id)
                                 .then(async () => {
                                   toast.success("Marked as called");
                                   await onRefresh?.();
@@ -314,7 +314,7 @@ function SuburbWorkshopsTable({
                             disabled={!dirty || savingNotesId === w.id}
                             onClick={() => {
                               setSavingNotesId(w.id);
-                              void updateSalesSuburbWorkshopAgentRemarks(w.id, draft)
+                              void updateSalesSuburbWorkshopAgentRemarks(w.id, draft, w.agent_contact_id)
                                 .then(async () => {
                                   toast.success("Remarks saved");
                                   await onRefresh?.();
@@ -353,6 +353,7 @@ function SuburbWorkshopsTable({
                                 void setSalesSuburbWorkshopFollowUp(
                                   w.id,
                                   fromDatetimeLocalValue(followDraft),
+                                  w.agent_contact_id,
                                 )
                                   .then(async () => {
                                     toast.success("Follow-up saved");
@@ -377,7 +378,7 @@ function SuburbWorkshopsTable({
                               onClick={() => {
                                 setSavingFollowUpId(w.id);
                                 setFollowUpDrafts((prev) => ({ ...prev, [w.id]: "" }));
-                                void setSalesSuburbWorkshopFollowUp(w.id, null)
+                                void setSalesSuburbWorkshopFollowUp(w.id, null, w.agent_contact_id)
                                   .then(async () => {
                                     toast.success("Follow-up cleared");
                                     await onRefresh?.();
@@ -628,6 +629,7 @@ export function AgentSalesHomeTab({
   const agentId = currentAgentDbId ?? resolveAgentId({ agents, session });
   const [leads, setLeads] = useState<SalesLeadRow[]>([]);
   const [suburbAssignments, setSuburbAssignments] = useState<SalesSuburbRow[]>([]);
+  const [resolvedAgentIdFromApi, setResolvedAgentIdFromApi] = useState<string | null>(null);
   const [commissions, setCommissions] = useState<
     Awaited<ReturnType<typeof fetchSalesCommissionTenant>>
   >([]);
@@ -641,16 +643,16 @@ export function AgentSalesHomeTab({
       setErr(null);
     }
     try {
-      const resolvedAgentId = currentAgentDbId ?? resolveAgentId({ agents, session });
       const [ml, sbRows] = await Promise.all([
         fetchSalesLeadsMine(),
-        resolvedAgentId
-          ? fetchAgentSuburbsAssigned(resolvedAgentId).catch(() => [] as SalesSuburbRow[])
-          : Promise.resolve([] as SalesSuburbRow[]),
+        fetchAgentSuburbsAssigned(),
       ]);
 
       setLeads(ml);
       setSuburbAssignments(sbRows);
+      if (sbRows.length > 0 && sbRows[0].agent_id) {
+        setResolvedAgentIdFromApi(sbRows[0].agent_id);
+      }
 
       const tids = [...new Set(ml.map((l) => l.tenant_id))];
       if (tids.length === 1) {
@@ -672,11 +674,14 @@ export function AgentSalesHomeTab({
         setLoading(false);
       }
     }
-  }, [agents, currentAgentDbId, session.userId]);
+  }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Use API-resolved agent ID as fallback when the local agents list match fails
+  const effectiveAgentId = agentId ?? resolvedAgentIdFromApi;
 
   const stats = useMemo(() => salesProgressFromLeads(leads), [leads]);
   const assignedSuburbLabels = useMemo(() => {
@@ -693,7 +698,7 @@ export function AgentSalesHomeTab({
     return labels.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   }, [suburbAssignments]);
   const pendingCommissions = commissions.filter((c) => c.status === "Pending Review" &&
-    (!agentId || c.agent_id === agentId)).length;
+    (!effectiveAgentId || c.agent_id === effectiveAgentId)).length;
   const followUps = leads.filter((l) => l.follow_up_at).length;
 
   return (
@@ -740,7 +745,7 @@ export function AgentSalesHomeTab({
                     Your territory from Sales → Agent suburb assignment.
                   </p>
                 </div>
-                {agentId && assignedSuburbLabels.length > 0 && (
+                {effectiveAgentId && assignedSuburbLabels.length > 0 && (
                   <AddWorkshopDialog 
                     assignedSuburbs={assignedSuburbLabels}
                     tenantId={agents.find((ag) => ag.userId === session.userId)?.tenantId || session.tenantId || ""}
@@ -750,7 +755,7 @@ export function AgentSalesHomeTab({
               </div>
             </CardHeader>
             <CardContent>
-              {!agentId ? (
+              {!effectiveAgentId && assignedSuburbLabels.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
                   Your login is not yet linked to an agent row - ops can attach it under Agents.
                 </p>
@@ -812,6 +817,9 @@ export function AgentMyCallListTab({
   tenants: _tenants,
   onRefreshDashboard: _onRefreshDashboard,
 }: SalesAgentTabProps) {
+  const effectiveAgentId = currentAgentDbId ?? resolveAgentId({ agents, session });
+  const effectiveTenantId =
+    agents.find((agent) => agent.id === effectiveAgentId)?.tenantId ?? session.tenantId ?? null;
   const [workshops, setWorkshops] = useState<SalesSuburbWorkshopWithAgentContact[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -823,9 +831,11 @@ export function AgentMyCallListTab({
       setLoadError(null);
     }
     try {
-      const ws = await fetchSalesSuburbWorkshopsWithAgentContact().catch(
-        () => [] as SalesSuburbWorkshopWithAgentContact[],
-      );
+      const ws = await fetchSalesSuburbWorkshopsWithAgentContact({
+        agentId: effectiveAgentId,
+        tenantId: effectiveTenantId,
+        userId: session.userId,
+      });
       setWorkshops(ws);
     } catch (e) {
       if (!silent) {
@@ -837,13 +847,13 @@ export function AgentMyCallListTab({
         setLoading(false);
       }
     }
-  }, []);
+  }, [effectiveAgentId, effectiveTenantId, session.userId]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  const agentLabel = agents.find((a) => (currentAgentDbId ?? resolveAgentId({ agents, session })) === a.id)?.name;
+  const agentLabel = agents.find((a) => effectiveAgentId === a.id)?.name;
 
   // Workshops that have an outcome (confirmed/rejected) move to Completed tab
   // Workshops with a follow-up time set move to Follow-ups tab
@@ -899,6 +909,11 @@ export function AgentMyCallListTab({
 }
 
 export function AgentCallWorkspaceTab(props: SalesAgentTabProps) {
+  const effectiveAgentId = props.currentAgentDbId ?? resolveAgentId(props);
+  const effectiveTenantId =
+    props.agents.find((agent) => agent.id === effectiveAgentId)?.tenantId ??
+    props.session.tenantId ??
+    null;
   const [rows, setRows] = useState<SalesLeadRow[]>([]);
   const [workshops, setWorkshops] = useState<SalesSuburbWorkshopWithAgentContact[]>([]);
   const [sel, setSel] = useState<string>("");
@@ -912,16 +927,18 @@ export function AgentCallWorkspaceTab(props: SalesAgentTabProps) {
     try {
       const [leads, ws] = await Promise.all([
         fetchSalesLeadsMine(),
-        fetchSalesSuburbWorkshopsWithAgentContact().catch(
-          () => [] as SalesSuburbWorkshopWithAgentContact[],
-        ),
+        fetchSalesSuburbWorkshopsWithAgentContact({
+          agentId: effectiveAgentId,
+          tenantId: effectiveTenantId,
+          userId: props.session.userId,
+        }),
       ]);
       setRows(leads);
       setWorkshops(ws);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [effectiveAgentId, effectiveTenantId, props.session.userId]);
 
   useEffect(() => {
     void reload();
@@ -1086,7 +1103,14 @@ export function AgentCallWorkspaceTab(props: SalesAgentTabProps) {
   );
 }
 
-export function AgentFollowUpsTab() {
+export function AgentFollowUpsTab({
+  agents,
+  session,
+  currentAgentDbId,
+}: SalesAgentTabProps) {
+  const effectiveAgentId = currentAgentDbId ?? resolveAgentId({ agents, session });
+  const effectiveTenantId =
+    agents.find((agent) => agent.id === effectiveAgentId)?.tenantId ?? session.tenantId ?? null;
   const [workshops, setWorkshops] = useState<SalesSuburbWorkshopWithAgentContact[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -1096,16 +1120,18 @@ export function AgentFollowUpsTab() {
       setLoading(true);
     }
     try {
-      const ws = await fetchSalesSuburbWorkshopsWithAgentContact().catch(
-        () => [] as SalesSuburbWorkshopWithAgentContact[],
-      );
+      const ws = await fetchSalesSuburbWorkshopsWithAgentContact({
+        agentId: effectiveAgentId,
+        tenantId: effectiveTenantId,
+        userId: session.userId,
+      });
       setWorkshops(ws);
     } finally {
       if (!silent) {
         setLoading(false);
       }
     }
-  }, []);
+  }, [effectiveAgentId, effectiveTenantId, session.userId]);
 
   useEffect(() => {
     void reload();
@@ -1245,7 +1271,14 @@ export function AgentPerformanceRewardsTab(props: SalesAgentTabProps) {
 }
 
 /** Shows workshops that have been marked as called AND the agent set a Confirmed or Rejected outcome. */
-export function AgentCompletedTab(_props: SalesAgentTabProps) {
+export function AgentCompletedTab({
+  agents,
+  session,
+  currentAgentDbId,
+}: SalesAgentTabProps) {
+  const effectiveAgentId = currentAgentDbId ?? resolveAgentId({ agents, session });
+  const effectiveTenantId =
+    agents.find((agent) => agent.id === effectiveAgentId)?.tenantId ?? session.tenantId ?? null;
   const [workshops, setWorkshops] = useState<SalesSuburbWorkshopWithAgentContact[]>([]);
   const [loading, setLoading] = useState(true);
   const [clearingId, setClearingId] = useState<string | null>(null);
@@ -1253,14 +1286,16 @@ export function AgentCompletedTab(_props: SalesAgentTabProps) {
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const ws = await fetchSalesSuburbWorkshopsWithAgentContact().catch(
-        () => [] as SalesSuburbWorkshopWithAgentContact[],
-      );
+      const ws = await fetchSalesSuburbWorkshopsWithAgentContact({
+        agentId: effectiveAgentId,
+        tenantId: effectiveTenantId,
+        userId: session.userId,
+      });
       setWorkshops(ws);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [effectiveAgentId, effectiveTenantId, session.userId]);
 
   useEffect(() => {
     void reload();
@@ -1275,9 +1310,9 @@ export function AgentCompletedTab(_props: SalesAgentTabProps) {
     [workshops],
   );
 
-  const clearStatus = (workshopId: string) => {
-    setClearingId(workshopId);
-    void setSalesSuburbWorkshopCallStatus(workshopId, null)
+  const clearStatus = (workshop: SalesSuburbWorkshopWithAgentContact) => {
+    setClearingId(workshop.id);
+    void setSalesSuburbWorkshopCallStatus(workshop.id, null, workshop.agent_contact_id)
       .then(async () => {
         toast.success("Moved back to call list");
         await reload();
@@ -1364,7 +1399,7 @@ export function AgentCompletedTab(_props: SalesAgentTabProps) {
                         variant="ghost"
                         className="text-xs"
                         disabled={clearingId === w.id}
-                        onClick={() => clearStatus(w.id)}
+                        onClick={() => clearStatus(w)}
                       >
                         {clearingId === w.id ? "Clearing..." : "Move back to call list"}
                       </Button>

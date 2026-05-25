@@ -248,6 +248,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
    */
   const effectiveSalesTenantId =
     session.tenantId || d.selectedTenant || d.tenants[0]?.id || null;
+  const selectedSalesTenantId = session.tenantId || d.selectedTenant || null;
 
   const currentAgentDbId = useMemo(
     () => d.agents.find((a) => a.userId === session.userId)?.id ?? null,
@@ -606,7 +607,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
               )}
               {d.selectedTab === 'sales-workshops' && (
                 <SalesSuburbWorkshopsTab
-                  tenantId={effectiveSalesTenantId}
+                  tenantId={selectedSalesTenantId}
                   tenants={d.tenants}
                   agents={d.agents}
                   queues={d.queues}
@@ -647,7 +648,14 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
                 />
               )}
               {d.selectedTab === 'agent-followups' && (
-                <AgentFollowUpsTab />
+                <AgentFollowUpsTab
+                  tenants={d.tenants}
+                  agents={d.agents}
+                  permissions={permissions}
+                  session={session}
+                  currentAgentDbId={currentAgentDbId}
+                  onRefreshDashboard={d.refresh}
+                />
               )}
               {d.selectedTab === 'agent-completed' && (
                 <AgentCompletedTab

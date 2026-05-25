@@ -11,6 +11,7 @@ import {
   fetchSalesSiteVisitsTenant,
   fetchSalesSuburbs,
   fetchSalesSuburbWorkshopAgentContactTenant,
+  fetchSalesSuburbWorkshopsAllTenants,
   fetchSalesSuburbWorkshopsTenant,
   fetchSalesTrialsTenant,
   insertSalesLead,
@@ -620,7 +621,7 @@ export function SalesAgentSuburbAssignmentTab({
     try {
       const [assignRows, wsRows] = await Promise.all([
         fetchSalesSuburbs(tid),
-        fetchSalesSuburbWorkshopsTenant(tid),
+        fetchSalesSuburbWorkshopsAllTenants(),
       ]);
       setRows(assignRows);
       setWorkshops(wsRows);
@@ -861,6 +862,8 @@ export function SalesAgentSuburbAssignmentTab({
 
 export function SalesSuburbWorkshopsTab({
   tenantId,
+  tenants,
+  permissions,
   onRefreshDashboard,
 }: SalesAdminTabProps) {
   const [rows, setRows] = useState<SalesSuburbWorkshopRow[]>([]);
@@ -875,18 +878,27 @@ export function SalesSuburbWorkshopsTab({
   const [website, setWebsite] = useState("");
   const [saving, setSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const showingAllTenants = permissions.canSwitchTenant && !tenantId;
+  const tenantNameById = useMemo(
+    () => new Map(tenants.map((t) => [t.id, t.name] as const)),
+    [tenants],
+  );
+  const formTenantId = tenantId ?? tenants[0]?.id ?? null;
 
-  const load = useCallback(async (tid: string) => {
+  const load = useCallback(async (tid: string | null) => {
     setLoadingTable(true);
     try {
-      setRows(await fetchSalesSuburbWorkshopsTenant(tid));
+      setRows(
+        tid
+          ? await fetchSalesSuburbWorkshopsTenant(tid)
+          : await fetchSalesSuburbWorkshopsAllTenants(),
+      );
     } finally {
       setLoadingTable(false);
     }
   }, []);
 
   useEffect(() => {
-    if (!tenantId) return;
     void load(tenantId);
   }, [tenantId, load]);
 
@@ -950,9 +962,11 @@ export function SalesSuburbWorkshopsTab({
     return sortedWsRows.filter(
       (w) =>
         (w.workshop_name && w.workshop_name.toLowerCase().includes(q)) ||
-        (w.phone_number && w.phone_number.toLowerCase().includes(q))
+        (w.phone_number && w.phone_number.toLowerCase().includes(q)) ||
+        (w.suburb && w.suburb.toLowerCase().includes(q)) ||
+        (tenantNameById.get(w.tenant_id) ?? "").toLowerCase().includes(q)
     );
-  }, [sortedWsRows, searchQuery]);
+  }, [sortedWsRows, searchQuery, tenantNameById]);
 
   const duplicateWarning = useMemo(() => {
     if (!workshopName.trim() && !phoneNumber.trim()) return null;
@@ -1030,7 +1044,7 @@ export function SalesSuburbWorkshopsTab({
       ? updateSalesSuburbWorkshop(editingId, payload).then(async () => {
           toast.success("Workshop saved");
           resetForm();
-          await load(tid);
+          await load(tenantId);
           onRefreshDashboard();
         })
       : insertSalesSuburbWorkshop({
@@ -1043,7 +1057,7 @@ export function SalesSuburbWorkshopsTab({
               : `This suburb now has ${countAfter} workshops - suburb stays filled.`,
           );
           partialResetKeepSuburb(subKeep);
-          await load(tid);
+          await load(tenantId);
           onRefreshDashboard();
         });
     void req.catch((e) => {
@@ -1053,13 +1067,14 @@ export function SalesSuburbWorkshopsTab({
   }
 
   return (
-    <SalesTenantScope tenantId={tenantId}>
+    <SalesTenantScope tenantId={formTenantId}>
       {(tid) => (
         <div className="space-y-4">
           <div>
             <h2 className="text-lg font-semibold">Suburb workshops</h2>
             <p className="text-sm text-muted-foreground">
               Log as many workshops as you need against the same suburb (each row is one site/dealer card). Reuse suburb spelling exactly as on CRM leads - case does not matter. Agents mapped to that suburb see every workshop here.
+              {showingAllTenants ? " Showing all clients via the super admin workshops API." : ""}
             </p>
           </div>
           {rows.length > 0 ? (
@@ -1213,6 +1228,7 @@ export function SalesSuburbWorkshopsTab({
               <Table>
                 <TableHeader>
                   <TableRow>
+                    {showingAllTenants ? <TableHead>Client</TableHead> : null}
                     <TableHead>Suburb</TableHead>
                     <TableHead>Workshop</TableHead>
                     <TableHead>Phone</TableHead>
@@ -1232,6 +1248,11 @@ export function SalesSuburbWorkshopsTab({
 
                     return (
                       <TableRow key={r.id}>
+                        {showingAllTenants ? (
+                          <TableCell className="text-sm">
+                            {tenantNameById.get(r.tenant_id) ?? r.tenant_id}
+                          </TableCell>
+                        ) : null}
                         <TableCell
                           className={
                             grouped ? "border-l-4 border-muted pl-4" : ""
@@ -1278,7 +1299,7 @@ export function SalesSuburbWorkshopsTab({
                             void deleteSalesSuburbWorkshop(r.id).then(async () => {
                               toast.success("Removed");
                               if (editingId === r.id) resetForm();
-                              await load(tid);
+                              await load(tenantId);
                               onRefreshDashboard();
                             }).catch(() => toast.error("Could not remove"));
                           }}
@@ -1291,7 +1312,7 @@ export function SalesSuburbWorkshopsTab({
                   })}
                   {rows.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={6}>
+                      <TableCell colSpan={showingAllTenants ? 7 : 6}>
                         <EmptyState message="Add the first workshop row. Reuse the same suburb name for additional sites in that area." />
                       </TableCell>
                     </TableRow>
@@ -1440,16 +1461,27 @@ export function SalesCallProgressTab({
   const [contacts, setContacts] = useState<SalesSuburbWorkshopContactRow[]>([]);
   const [workshops, setWorkshops] = useState<SalesSuburbWorkshopRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async (tid: string) => {
     setLoading(true);
+    setLoadError(null);
     try {
-      const [c, w] = await Promise.all([
+      const [c, tenantWs, allWs] = await Promise.all([
         fetchSalesSuburbWorkshopAgentContactTenant(tid),
         fetchSalesSuburbWorkshopsTenant(tid),
+        fetchSalesSuburbWorkshopsAllTenants().catch(() => [] as SalesSuburbWorkshopRow[]),
       ]);
       setContacts(c);
-      setWorkshops(w);
+      // Union: prefer the tenant-scoped row when both lists return the same id.
+      const merged = new Map<string, SalesSuburbWorkshopRow>();
+      for (const w of allWs) merged.set(w.id, w);
+      for (const w of tenantWs) merged.set(w.id, w);
+      setWorkshops(Array.from(merged.values()));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Failed to load call progress";
+      setLoadError(msg);
+      console.error("[SalesCallProgressTab] load failed", e);
     } finally {
       setLoading(false);
     }
@@ -1506,6 +1538,11 @@ export function SalesCallProgressTab({
               Refresh
             </Button>
           </div>
+          {loadError ? (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+              Could not load call progress: {loadError}
+            </div>
+          ) : null}
           {loading ? (
             <EmptyState message="Loading workshop contact activity..." />
           ) : (
