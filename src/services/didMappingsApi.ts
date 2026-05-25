@@ -16,9 +16,15 @@ import {
 } from './auditLogApi';
 import type { DIDMapping } from './types';
 
-const BASE_URL =
-  (import.meta.env.VITE_BMS_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
-  `${API_BASE}/bms-black`;
+/**
+ * Always go through the Command Centre backend proxy (`/api/bms-black/...`).
+ * Calling BMS Black directly with the Supabase access token returns 401 because
+ * BMS Black `/api/call-center/*` expects a Firebase ID token; the backend bridges
+ * the Supabase session to a stored Firebase Black token. Do not re-introduce a
+ * `VITE_BMS_API_URL` override here unless that variable points at a proxy that
+ * performs the same Supabase→Firebase bridging.
+ */
+const BASE_URL = `${API_BASE}/bms-black`;
 
 const DID_MAPPINGS_API_URL =
   (import.meta.env.VITE_DID_MAPPINGS_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||

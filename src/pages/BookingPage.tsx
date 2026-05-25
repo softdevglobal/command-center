@@ -218,6 +218,66 @@ type SimpleHoursShape = {
   closed?: boolean;
 };
 
+/**
+ * Local-parts and domains agents commonly type when the customer has no email,
+ * mirrored on the BMS Black backend (`isPlaceholderCustomerEmail`). We strip
+ * these client-side so the booking request omits `clientEmail` entirely instead
+ * of provisioning a customer + sending a SendGrid welcome email to a fake inbox.
+ */
+const PLACEHOLDER_EMAIL_LOCAL_PARTS = new Set([
+  "unknown",
+  "none",
+  "no",
+  "noemail",
+  "no-email",
+  "n/a",
+  "na",
+  "nil",
+  "nomail",
+  "no-mail",
+  "test",
+  "dummy",
+  "fake",
+  "placeholder",
+  "tbd",
+  "tba",
+  "x",
+]);
+
+const PLACEHOLDER_EMAIL_DOMAINS = new Set([
+  "email.com",
+  "noemail.com",
+  "no-email.com",
+  "none.com",
+  "test.com",
+  "example.com",
+  "example.org",
+  "test.test",
+  "dummy.com",
+  "fake.com",
+  "placeholder.com",
+]);
+
+function isPlaceholderCustomerEmail(email: string | null | undefined): boolean {
+  const raw = String(email ?? "").trim().toLowerCase();
+  if (!raw) return false;
+  const at = raw.lastIndexOf("@");
+  if (at <= 0 || at === raw.length - 1) return false;
+  const local = raw.slice(0, at);
+  const domain = raw.slice(at + 1);
+  if (PLACEHOLDER_EMAIL_DOMAINS.has(domain)) return true;
+  if (PLACEHOLDER_EMAIL_LOCAL_PARTS.has(local)) return true;
+  return false;
+}
+
+/** Empty string when the agent typed a placeholder; otherwise the trimmed email. */
+function sanitizeCustomerEmailForBooking(email: string | null | undefined): string {
+  const raw = String(email ?? "").trim();
+  if (!raw) return "";
+  if (isPlaceholderCustomerEmail(raw)) return "";
+  return raw;
+}
+
 function getInlineSchedule(detail: unknown): SimpleHoursShape | null {
   if (!detail || typeof detail !== "object") return null;
   const d = detail as Record<string, unknown>;
@@ -982,6 +1042,8 @@ export default function BookingPage() {
       engineNumber: vehicleEngineNumber || undefined,
     };
 
+    const sanitizedCustomerEmail = sanitizeCustomerEmailForBooking(customerEmail);
+
     const payload = {
       ownerUid: ownerUidToUse,
       branchId,
@@ -990,7 +1052,7 @@ export default function BookingPage() {
       pickupTime: pickupTime || undefined,
       services: serviceItems,
       client: customerName,
-      clientEmail: customerEmail,
+      clientEmail: sanitizedCustomerEmail,
       clientPhone: customerPhone,
       customerId: state?.customerId ?? undefined,
       ...(pricingVehicleType ? { vehicleType: pricingVehicleType } : {}),
@@ -1018,7 +1080,7 @@ export default function BookingPage() {
           agent_email: firebaseUser?.email ?? null,
           client_name: customerName,
           client_phone: customerPhone || null,
-          client_email: customerEmail || null,
+          client_email: sanitizedCustomerEmail || null,
           customer_id: state?.customerId ?? null,
           vehicle_number: vehicleRego || null,
           vehicle_details: [vehicleYear, vehicleMake, vehicleModel].filter(Boolean).join(" ") || null,
@@ -1514,14 +1576,14 @@ export default function BookingPage() {
                   </div>
                   <div className="space-y-1.5 sm:col-span-2">
                     <Label htmlFor="customer-email">
-                      Email <span className="text-rose-500">*</span>
+                      Email <span className="text-slate-400">(optional)</span>
                     </Label>
                     <Input
                       id="customer-email"
                       type="email"
                       value={customerEmail}
                       onChange={(e) => setCustomerEmail(e.target.value)}
-                      placeholder="name@example.com"
+                      placeholder="name@example.com — leave blank if unknown"
                     />
                   </div>
                 </div>
