@@ -245,9 +245,9 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
     }
   };
 
-  const filteredAgents = agents
-    .filter((a) => !String(a.bmsOwnerUid ?? "").trim())
-    .filter((a) => a.name.toLowerCase().includes(search.toLowerCase()));
+  const filteredAgents = agents.filter((a) =>
+    a.name.toLowerCase().includes(search.toLowerCase())
+  );
 
   if (loading) {
     return (

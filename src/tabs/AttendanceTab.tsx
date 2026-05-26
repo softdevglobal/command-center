@@ -48,7 +48,7 @@ export function AttendanceTab({
           <div>
             <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Shift schedule</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              Define the weekly working hours for each command center agent.
+              Define the weekly working hours for each agent.
             </p>
           </div>
           <AgentShiftScheduleBoard agents={agents} />
@@ -83,19 +83,6 @@ export function AttendanceTab({
       );
     }
     if (section === "shift-schedule") {
-      const currentAgent = agents.find((a) => a.userId === session.userId);
-      const isCCAgent = currentAgent && !String(currentAgent.bmsOwnerUid ?? "").trim();
-
-      if (!isCCAgent) {
-        return (
-          <div className="cc-fade-in mx-auto max-w-6xl space-y-6 text-center pt-12">
-            <p className="text-muted-foreground text-sm">
-              Shift schedule is only available for Command Center agents.
-            </p>
-          </div>
-        );
-      }
-
       return (
         <div className="cc-fade-in mx-auto max-w-6xl space-y-6">
           <div>

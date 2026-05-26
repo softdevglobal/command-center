@@ -33,10 +33,14 @@ export function AgentShiftScheduleView({ session, agents }: AgentShiftScheduleVi
   useEffect(() => {
     async function load() {
       try {
-        const currentAgent = agents.find(a => a.userId === session.userId);
-        if (!currentAgent) return;
-        
-        const data = await fetchMyShiftSchedule(currentAgent.id);
+        const matchingAgentIds = agents
+          .filter((agent) => agent.userId === session.userId)
+          .map((agent) => agent.id);
+
+        const data = await fetchMyShiftSchedule({
+          userId: session.userId,
+          candidateIds: matchingAgentIds,
+        });
         setSchedule(data);
       } catch (err) {
         console.error(err);

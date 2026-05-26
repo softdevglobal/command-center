@@ -434,10 +434,6 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
         onSignOut={onSignOut}
         chatNavUnreadCount={chatNavUnreadCount + internalChatUnreadCount}
         pendingLeaveCount={pendingLeaveCount}
-        isCCAgent={
-          session.role === 'agent' &&
-          !!d.agents.find((a) => a.userId === session.userId && !String(a.bmsOwnerUid ?? '').trim())
-        }
       />
 
       {/* Main content */}

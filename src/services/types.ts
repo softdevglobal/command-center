@@ -244,6 +244,8 @@ export interface BusinessHours {
 export interface AgentShiftSchedule {
   id: string;
   agentId: string;
+  /** Supabase auth user id when the API includes it for agent-scoped reads. */
+  userId?: string | null;
   monday: string | null;
   tuesday: string | null;
   wednesday: string | null;

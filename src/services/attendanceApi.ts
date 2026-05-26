@@ -186,10 +186,13 @@ function normalizeShiftScheduleValue(raw: unknown): string | null {
 
 function normalizeAgentShiftSchedule(raw: unknown): AgentShiftSchedule {
   const row = asRecord(raw);
-  const agentId = pickString(row, ["agentId", "agent_id", "userId", "user_id"]);
+  const agentId = pickString(row, ["agentId", "agent_id", "agent"]);
+  const userId = pickNullableString(row, ["userId", "user_id", "authUserId", "auth_user_id"]);
+  const resolvedAgentId = agentId || userId || "";
   return {
-    id: pickString(row, ["id", "scheduleId", "schedule_id"]) || agentId,
-    agentId,
+    id: pickString(row, ["id", "scheduleId", "schedule_id"]) || resolvedAgentId,
+    agentId: resolvedAgentId,
+    userId,
     monday: normalizeShiftScheduleValue(row.monday),
     tuesday: normalizeShiftScheduleValue(row.tuesday),
     wednesday: normalizeShiftScheduleValue(row.wednesday),
@@ -827,9 +830,44 @@ export async function fetchAgentShiftSchedules(): Promise<AgentShiftSchedule[]> 
   return extractShiftSchedules(await readJsonBody(res));
 }
 
-export async function fetchMyShiftSchedule(agentId: string): Promise<AgentShiftSchedule | null> {
+type MyShiftScheduleLookup =
+  | string
+  | string[]
+  | {
+      agentId?: string | null;
+      userId?: string | null;
+      candidateIds?: Array<string | null | undefined>;
+    };
+
+function shiftScheduleLookupIds(lookup: MyShiftScheduleLookup): string[] {
+  const rawIds =
+    typeof lookup === "string"
+      ? [lookup]
+      : Array.isArray(lookup)
+        ? lookup
+        : [lookup.agentId, lookup.userId, ...(lookup.candidateIds ?? [])];
+
+  return Array.from(
+    new Set(
+      rawIds
+        .map((id) => id?.trim())
+        .filter((id): id is string => Boolean(id)),
+    ),
+  );
+}
+
+export async function fetchMyShiftSchedule(lookup: MyShiftScheduleLookup): Promise<AgentShiftSchedule | null> {
   const schedules = await fetchAgentShiftSchedules();
-  return schedules.find((schedule) => schedule.agentId === agentId) ?? null;
+  const ids = shiftScheduleLookupIds(lookup);
+
+  const match = schedules.find((schedule) =>
+    ids.some((id) => schedule.agentId === id || schedule.userId === id),
+  );
+  if (match) return match;
+
+  // Agent tokens may receive only their own schedule even if the row uses an
+  // internal agent id that the agent-only dashboard cannot load separately.
+  return schedules.length === 1 ? schedules[0] : null;
 }
 
 export async function upsertAgentShiftSchedule(
