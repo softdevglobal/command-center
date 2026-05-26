@@ -18,6 +18,8 @@ export type SalesSuburbWorkshopRow =
   Database["public"]["Tables"]["sales_suburb_workshops"]["Row"];
 export type SalesSuburbWorkshopContactRow =
   Database["public"]["Tables"]["sales_suburb_workshop_agent_contact"]["Row"];
+type SalesSuburbWorkshopContactUpdate =
+  Database["public"]["Tables"]["sales_suburb_workshop_agent_contact"]["Update"];
 /** Workshop directory row plus this agent’s call/remarks from `sales_suburb_workshop_agent_contact`. */
 export type SalesSuburbWorkshopWithAgentContact = SalesSuburbWorkshopRow & {
   agent_contact_id: string | null;
@@ -931,6 +933,40 @@ type SalesWorkshopAgentContactPatch = {
   callStatus?: "confirmed" | "rejected" | null;
 };
 
+function patchContainsNullValue(patch: SalesWorkshopAgentContactPatch): boolean {
+  return Object.values(patch).some((value) => value === null);
+}
+
+function toSalesSuburbWorkshopAgentContactUpdate(
+  patch: SalesWorkshopAgentContactPatch,
+): SalesSuburbWorkshopContactUpdate {
+  const update: SalesSuburbWorkshopContactUpdate = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if ("firstCalledAt" in patch) update.first_called_at = patch.firstCalledAt ?? null;
+  if ("remarks" in patch) update.remarks = patch.remarks ?? "";
+  if ("followUpAt" in patch) update.follow_up_at = patch.followUpAt ?? null;
+  if ("callStatus" in patch) update.call_status = patch.callStatus ?? null;
+
+  return update;
+}
+
+async function patchSalesSuburbWorkshopAgentContactDirect(
+  contactId: string,
+  patch: SalesWorkshopAgentContactPatch,
+): Promise<SalesSuburbWorkshopContactRow> {
+  const { data, error } = await supabase
+    .from("sales_suburb_workshop_agent_contact")
+    .update(toSalesSuburbWorkshopAgentContactUpdate(patch))
+    .eq("id", contactId)
+    .select("*")
+    .single();
+
+  if (error) throw new Error(formatSupabaseError(error));
+  return data;
+}
+
 async function upsertSalesSuburbWorkshopAgentContact(opts: {
   workshopId: string;
   contactId?: string | null;
@@ -942,10 +978,12 @@ async function upsertSalesSuburbWorkshopAgentContact(opts: {
   const tenantId = opts.tenantId?.trim() || null;
 
   const raw = contactId
-    ? await requestSalesSuburbWorkshopAgentContacts("PATCH", {
-        id: contactId,
-        body: opts.patch,
-      })
+    ? patchContainsNullValue(opts.patch)
+      ? await patchSalesSuburbWorkshopAgentContactDirect(contactId, opts.patch)
+      : await requestSalesSuburbWorkshopAgentContacts("PATCH", {
+          id: contactId,
+          body: opts.patch,
+        })
     : await requestSalesSuburbWorkshopAgentContacts("POST", {
         body: {
           workshopId,
