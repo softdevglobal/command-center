@@ -38,6 +38,7 @@ import {
   fetchConversations,
   fetchConversationMessages,
   fetchCallCenterChatMessages,
+  fetchCallCenterChats,
   postConversationMessage,
   postCallCenterChatMessage,
   postConversationRead,
@@ -81,6 +82,22 @@ type ChatMode = 'support' | 'internal';
 /** Sent automatically when opening a workshop thread from the picker (POST start-with-owner `text`). */
 const WORKSHOP_AUTO_OPEN_MESSAGE =
   "Hello — we're contacting you from the call center. Please let us know how we can help.";
+
+const AGENT_SENDER_ROLES = new Set([
+  'agent',
+  'call_center_agent',
+  'call_center_admin',
+  'super_admin',
+]);
+
+const CUSTOMER_SENDER_ROLES = new Set([
+  'customer',
+  'workshop_owner',
+  'workshop',
+  'branch_admin',
+  'staff',
+  'tenant',
+]);
 
 function formatDateTime(iso: string): string {
   if (!iso) return 'N/A';
@@ -238,13 +255,36 @@ export function ChatTab({
   }, [chatListScope.tenantId, chatListScope.ownerUid]);
 
   const loadConversations = useCallback(async () => {
-    const data = await fetchConversations({
-      tenantId: chatListScope.tenantId,
-      ownerUid: chatListScope.ownerUid,
+    const [data, ccChats] = await Promise.all([
+      fetchConversations({
+        tenantId: chatListScope.tenantId,
+        ownerUid: chatListScope.ownerUid,
+      }),
+      fetchCallCenterChats(50).catch((err) => {
+        console.warn('[ChatTab] fetchCallCenterChats failed', err);
+        return [] as Conversation[];
+      }),
+    ]);
+
+    for (const c of ccChats) {
+      if (c.conversationId) callCenterThreadIdsRef.current.add(c.conversationId);
+    }
+
+    const supportIds = new Set([
+      ...data.queue.map((c) => c.conversationId),
+      ...data.mine.map((c) => c.conversationId),
+    ]);
+    const extraMine = ccChats.filter((c) => !supportIds.has(c.conversationId));
+    const mergedMine = [...data.mine, ...extraMine].sort((a, b) => {
+      const at = a.lastMessageAt || a.updatedAt || a.createdAt || '';
+      const bt = b.lastMessageAt || b.updatedAt || b.createdAt || '';
+      return bt.localeCompare(at);
     });
+
     setQueue(data.queue);
-    setMine(data.mine);
-    const ownerUids = [...data.queue, ...data.mine]
+    setMine(mergedMine);
+
+    const ownerUids = [...data.queue, ...mergedMine]
       .map((c) => c.ownerUid)
       .filter((uid): uid is string => !!uid);
     void fetchWorkshopNames(ownerUids).then(setWorkshopNameMap);
@@ -337,21 +377,8 @@ export function ChatTab({
       setThreadError(null);
       try {
         if (callCenterThreadIdsRef.current.has(selectedId)) {
-          let rows = await fetchCallCenterChatMessages(selectedId);
+          const rows = await fetchCallCenterChatMessages(selectedId);
           if (cancelled) return;
-          if (rows.length === 0) {
-            const uid = firebaseUser?.uid?.trim() || session.userId;
-            rows = [
-              {
-                messageId: '',
-                conversationId: selectedId,
-                chatId: selectedId,
-                senderId: uid,
-                text: WORKSHOP_AUTO_OPEN_MESSAGE,
-                createdAt: new Date().toISOString(),
-              },
-            ];
-          }
           setMessages(rows);
 
           if (cancelled) return;
@@ -486,12 +513,46 @@ export function ChatTab({
 
   const isAgentMessage = useCallback(
     (m: ChatMessage) => {
+      const role = m.senderRole?.trim().toLowerCase() ?? '';
+      if (role) {
+        if (AGENT_SENDER_ROLES.has(role)) return true;
+        if (CUSTOMER_SENDER_ROLES.has(role)) return false;
+      }
+
       const uid = firebaseUser?.uid?.trim() ?? '';
       if (m.senderId === session.userId || (!!uid && m.senderId === uid)) return true;
       const aid = selectedConversation?.agentId?.trim();
-      return !!aid && m.senderId === aid;
+      if (!!aid && m.senderId === aid) return true;
+
+      const tenantUid =
+        selectedConversation?.userId?.trim() ||
+        selectedConversation?.ownerUid?.trim() ||
+        activeWorkshopOwner?.ownerUid?.trim() ||
+        pendingWorkshopOwnerUidRef.current?.trim() ||
+        '';
+      if (tenantUid && m.senderId === tenantUid) return false;
+
+      if (
+        selectedId &&
+        callCenterThreadIdsRef.current.has(selectedId) &&
+        tenantUid &&
+        m.senderId &&
+        m.senderId !== tenantUid
+      ) {
+        return true;
+      }
+
+      return false;
     },
-    [session.userId, firebaseUser?.uid, selectedConversation?.agentId],
+    [
+      session.userId,
+      firebaseUser?.uid,
+      selectedConversation?.agentId,
+      selectedConversation?.userId,
+      selectedConversation?.ownerUid,
+      activeWorkshopOwner?.ownerUid,
+      selectedId,
+    ],
   );
 
   useEffect(() => {
@@ -586,15 +647,38 @@ export function ChatTab({
       pendingWorkshopOwnerUidRef.current = ownerUid;
       try {
         const owner = owners.find((o) => o.ownerUid === ownerUid) ?? null;
-        const started = await startCallCenterChatWithOwner(ownerUid, WORKSHOP_AUTO_OPEN_MESSAGE);
+        const started = await startCallCenterChatWithOwner(ownerUid);
         setActiveWorkshopOwner(owner);
         closeStartChat();
-        await loadConversations();
+
         if (started.chatId) {
           callCenterThreadIdsRef.current.add(started.chatId);
+
+          /** Send welcome only when the thread has no real messages yet — covers both brand-new docs and ones created earlier without a first message. Re-opening an already-used chat must NOT spam the workshop. */
+          let sendWelcome = started.created;
+          if (!sendWelcome) {
+            try {
+              const existing = await fetchCallCenterChatMessages(started.chatId);
+              sendWelcome = existing.length === 0;
+            } catch {
+              /* If we can't read messages, be safe and skip the welcome. */
+              sendWelcome = false;
+            }
+          }
+
+          if (sendWelcome) {
+            try {
+              await postCallCenterChatMessage(started.chatId, WORKSHOP_AUTO_OPEN_MESSAGE);
+            } catch (sendErr) {
+              console.warn('[ChatTab] welcome message failed', sendErr);
+            }
+          }
+
+          await loadConversations();
           await handleSelectConversation(started.chatId);
         } else {
           pendingWorkshopOwnerUidRef.current = null;
+          await loadConversations();
         }
       } catch (e) {
         pendingWorkshopOwnerUidRef.current = null;
@@ -649,9 +733,11 @@ export function ChatTab({
 
       if (created) {
         const uid = firebaseUser?.uid?.trim() ?? '';
-        const msg = !created.senderId?.trim()
-          ? { ...created, senderId: uid || session.userId }
-          : created;
+        const msg = {
+          ...created,
+          senderId: created.senderId?.trim() || uid || session.userId,
+          senderRole: created.senderRole?.trim() || 'agent',
+        };
 
         setMessages((prev) => {
           const id = msg.messageId?.trim();
@@ -936,12 +1022,12 @@ export function ChatTab({
                 </div>
               ) : (
                 <>
-                  {mine.length > 0 && (
+                  {queue.length > 0 && (
                     <div className="space-y-2">
                       <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                        Mine
+                        Queue
                       </p>
-                      {mine.map((c) => (
+                      {queue.map((c) => (
                         <ConversationRow
                           key={c.conversationId}
                           conversation={c}
@@ -952,12 +1038,12 @@ export function ChatTab({
                       ))}
                     </div>
                   )}
-                  {queue.length > 0 && (
+                  {mine.length > 0 && (
                     <div className="space-y-2">
                       <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                        Queue
+                        Mine
                       </p>
-                      {queue.map((c) => (
+                      {mine.map((c) => (
                         <ConversationRow
                           key={c.conversationId}
                           conversation={c}

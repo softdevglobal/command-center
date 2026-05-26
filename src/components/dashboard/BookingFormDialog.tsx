@@ -22,6 +22,65 @@ import {
 } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 
+/**
+ * Local-parts and domains agents commonly type when the customer has no email.
+ * Mirrors `isPlaceholderCustomerEmail` on BMS Black so we omit `clientEmail`
+ * from the booking request rather than auto-provisioning a customer + sending
+ * a SendGrid welcome email to a fake inbox.
+ */
+const PLACEHOLDER_EMAIL_LOCAL_PARTS = new Set([
+  'unknown',
+  'none',
+  'no',
+  'noemail',
+  'no-email',
+  'n/a',
+  'na',
+  'nil',
+  'nomail',
+  'no-mail',
+  'test',
+  'dummy',
+  'fake',
+  'placeholder',
+  'tbd',
+  'tba',
+  'x',
+]);
+
+const PLACEHOLDER_EMAIL_DOMAINS = new Set([
+  'email.com',
+  'noemail.com',
+  'no-email.com',
+  'none.com',
+  'test.com',
+  'example.com',
+  'example.org',
+  'test.test',
+  'dummy.com',
+  'fake.com',
+  'placeholder.com',
+]);
+
+function isPlaceholderCustomerEmail(email: string | null | undefined): boolean {
+  const raw = String(email ?? '').trim().toLowerCase();
+  if (!raw) return false;
+  const at = raw.lastIndexOf('@');
+  if (at <= 0 || at === raw.length - 1) return false;
+  const local = raw.slice(0, at);
+  const domain = raw.slice(at + 1);
+  if (PLACEHOLDER_EMAIL_DOMAINS.has(domain)) return true;
+  if (PLACEHOLDER_EMAIL_LOCAL_PARTS.has(local)) return true;
+  return false;
+}
+
+function sanitizeCustomerEmailForBooking(email: string | null | undefined): string {
+  const raw = String(email ?? '').trim();
+  if (!raw) return '';
+  if (isPlaceholderCustomerEmail(raw)) return '';
+  return raw;
+}
+
 interface BookingFormValues {
   customerName: string;
   customerPhone: string;
@@ -151,11 +210,13 @@ export function BookingFormDialog({
       return;
     }
 
+    const sanitizedCustomerEmail = sanitizeCustomerEmailForBooking(bookingForm.customerEmail);
+
     const payload = {
       branchId,
       client: bookingForm.customerName,
       clientPhone: bookingForm.customerPhone,
-      clientEmail: bookingForm.customerEmail || undefined,
+      clientEmail: sanitizedCustomerEmail || undefined,
       date: bookingForm.bookingDate,
       time: bookingForm.dropOffTime,
       pickupTime: bookingForm.pickupTime || undefined,

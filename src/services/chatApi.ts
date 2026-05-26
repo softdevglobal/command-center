@@ -334,7 +334,7 @@ function toMessage(raw: unknown, fallbackConversationId: string): ChatMessage {
     messageId: String(r.messageId ?? r.id ?? ''),
     conversationId: convId,
     chatId: convId,
-    senderId: String(r.senderId ?? r.userId ?? ''),
+    senderId: String(r.senderId ?? r.senderUid ?? r.userId ?? ''),
     text: extractMessageText(raw),
     createdAt: extractMessageCreatedAt(r),
     senderRole: r.senderRole != null ? String(r.senderRole) : undefined,
@@ -423,6 +423,7 @@ export async function postConversationMessage(
     conversationId,
     chatId: conversationId,
     senderId: '',
+    senderRole: 'agent',
     text,
     createdAt: new Date().toISOString(),
   };
@@ -432,7 +433,8 @@ export async function postConversationMessage(
   try {
     const parsed = JSON.parse(rawText) as Record<string, unknown>;
     const payload = parsed.message ?? parsed.data ?? parsed;
-    return toMessage(payload, conversationId);
+    const msg = toMessage(payload, conversationId);
+    return msg.senderRole?.trim() ? msg : { ...msg, senderRole: 'agent' };
   } catch {
     return fallback;
   }
@@ -557,7 +559,22 @@ export async function fetchCallCenterWorkshopOwners(): Promise<CallCenterWorksho
 export type StartCallCenterChatResponse = {
   chatId: string;
   conversationId?: string;
+  /** True when the backend created a brand-new chat doc (vs. reusing the deterministic 1:1 thread). */
+  created: boolean;
 };
+
+function extractStartedChatCreated(json: unknown): boolean {
+  if (!json || typeof json !== 'object') return false;
+  const r = json as Record<string, unknown>;
+  if (typeof r.created === 'boolean') return r.created;
+  for (const wrap of ['data', 'result', 'payload'] as const) {
+    const w = r[wrap];
+    if (w && typeof w === 'object' && typeof (w as Record<string, unknown>).created === 'boolean') {
+      return (w as Record<string, unknown>).created as boolean;
+    }
+  }
+  return false;
+}
 
 function extractChatId(json: unknown): string {
   const seen = new Set<unknown>();
@@ -613,7 +630,8 @@ export async function startCallCenterChatWithOwner(
   const rawText = await res.text();
   const parsed: unknown = rawText.trim() ? (JSON.parse(rawText) as unknown) : rawText;
   const chatId = extractChatId(parsed);
-  return { chatId, conversationId: chatId || undefined };
+  const created = extractStartedChatCreated(parsed);
+  return { chatId, conversationId: chatId || undefined, created };
 }
 
 export async function postCallCenterChatMessage(
@@ -638,6 +656,7 @@ export async function postCallCenterChatMessage(
     conversationId: chatId,
     chatId,
     senderId: '',
+    senderRole: 'agent',
     text,
     createdAt: new Date().toISOString(),
   };
@@ -647,7 +666,8 @@ export async function postCallCenterChatMessage(
   try {
     const parsed = JSON.parse(rawText) as Record<string, unknown>;
     const payload = parsed.message ?? parsed.data ?? parsed;
-    return toMessage(payload, chatId);
+    const msg = toMessage(payload, chatId);
+    return msg.senderRole?.trim() ? msg : { ...msg, senderRole: 'agent' };
   } catch {
     return fallback;
   }
@@ -680,6 +700,88 @@ export async function postCallCenterChatClose(chatId: string): Promise<void> {
       `postCallCenterChatClose failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
     );
   }
+}
+
+function collectCcChatsArray(json: unknown): unknown[] {
+  if (Array.isArray(json)) return json;
+  if (json && typeof json === 'object') {
+    const o = json as Record<string, unknown>;
+    if (Array.isArray(o.chats)) return o.chats;
+    const data = o.data;
+    if (data && typeof data === 'object') {
+      const d = data as Record<string, unknown>;
+      if (Array.isArray(d.chats)) return d.chats;
+    }
+  }
+  return [];
+}
+
+/** Maps a `/api/call-center/chats` row (CcChatWithDetails) onto the support-chat `Conversation` shape so the inbox can render both kinds of threads side by side. */
+function ccChatToConversation(raw: unknown): Conversation {
+  const r = asRecord(raw);
+  const workshop = asRecord(r.workshop);
+  const workshopUser = asRecord(r.workshopUser);
+
+  const chatId = String(r.chatId ?? r.conversationId ?? '');
+  const tenantUid = String(r.tenantUserUid ?? '');
+  const ownerUid = String(r.workshopOwnerUid ?? '');
+  const agentUid = String(r.agentUid ?? '') || null;
+  const lastSenderId = String(r.lastSenderId ?? '');
+  const lastSenderRole = lastSenderId
+    ? lastSenderId === tenantUid
+      ? 'customer'
+      : 'agent'
+    : '';
+
+  const userName =
+    String(workshopUser.name ?? workshopUser.displayName ?? '').trim() ||
+    String(workshop.name ?? workshop.displayName ?? '').trim() ||
+    String(r.tenantName ?? '').trim() ||
+    'Workshop';
+  const userEmail =
+    String(workshopUser.email ?? '').trim() || String(workshop.email ?? '').trim() || null;
+  const userPhone =
+    String(workshopUser.phone ?? '').trim() || String(workshop.phone ?? '').trim() || null;
+  const role = String(workshopUser.role ?? r.tenantRole ?? '').trim();
+
+  return {
+    conversationId: chatId,
+    userId: tenantUid,
+    userName,
+    userEmail: userEmail || null,
+    userPhone: userPhone || null,
+    role,
+    ownerUid: ownerUid || null,
+    status: String(r.sessionStatus ?? 'open'),
+    agentId: agentUid,
+    agentName: String(r.agentName ?? '') || null,
+    agentEmail: null,
+    lastMessage: String(r.lastMessageText ?? ''),
+    lastMessageAt: String(r.lastMessageAt ?? r.updatedAt ?? r.createdAt ?? ''),
+    lastSender: lastSenderRole,
+    unreadForAgent: r.unreadForAgent === true ? 1 : 0,
+    unreadForCustomer: r.unreadForTenant === true ? 1 : 0,
+    createdAt: String(r.createdAt ?? ''),
+    updatedAt: String(r.updatedAt ?? r.createdAt ?? ''),
+    claimedAt: null,
+    closedAt: r.closedAt == null ? null : String(r.closedAt),
+    closedBy: r.closedByUid == null ? null : String(r.closedByUid),
+  };
+}
+
+/** Returns the call-center direct chats visible to the current agent (assigned + reachable workshops). */
+export async function fetchCallCenterChats(limit = 50): Promise<Conversation[]> {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  const res = await authorizedFetchCallCenter(`/chats?${params.toString()}`);
+  if (!res.ok) {
+    const detail = await readHttpErrorDetail(res);
+    throw new Error(
+      `fetchCallCenterChats failed: ${res.status}${detail ? ` - ${detail}` : ''}`,
+    );
+  }
+  const json = (await res.json()) as unknown;
+  return collectCcChatsArray(json).map(ccChatToConversation);
 }
 
 // ── Compatibility wrappers (Dashboard sidebar + older hooks) ────────────────
