@@ -1052,6 +1052,33 @@ function pbxCallIdFromCallsRowId(id: string): string | null {
   return id.slice("yeastar-".length) || null;
 }
 
+function digitsOnlyText(value: string): string {
+  return String(value ?? "").replace(/\D/g, "");
+}
+
+function cleanPbxCallId(value: string): string {
+  const withoutHost = String(value ?? "").trim().split("@")[0]?.trim() || "";
+  return withoutHost.replace(/(?:[_-](?:leg|ring|queue|agent|ext|admin)[_-]?\d*)$/i, "");
+}
+
+function pbxDispositionLookupKeys(pbxId: string): string[] {
+  const raw = String(pbxId ?? "").trim();
+  const hostless = raw.split("@")[0]?.trim() || "";
+  const cleaned = cleanPbxCallId(raw);
+  return [...new Set([raw, hostless, cleaned].filter(Boolean))];
+}
+
+function pbxCallIdsCompatible(a: string, b: string): boolean {
+  const aKeys = pbxDispositionLookupKeys(a);
+  const bKeys = new Set(pbxDispositionLookupKeys(b));
+  if (aKeys.some((key) => bKeys.has(key))) return true;
+
+  const ad = digitsOnlyText(cleanPbxCallId(a));
+  const bd = digitsOnlyText(cleanPbxCallId(b));
+  if (!ad || !bd || Math.min(ad.length, bd.length) < 8) return false;
+  return ad === bd || ad.endsWith(bd) || bd.endsWith(ad);
+}
+
 export async function fetchCalls(
   tenantId?: string | null,
   limit: number = 200,
@@ -1066,20 +1093,33 @@ export async function fetchCalls(
 
   // ── De-duplicate Yeastar CDR legs ────────────────────────────────────────
   // Yeastar PBX emits one CDR per call leg (queue ring, each agent ring, etc.).
-  // We collapse those into one row per unique call using a 3-minute time window.
-  // Priority: softphone disposition match > answered with DID > answered > longest duration.
+  // We collapse those into one row per unique call, preferring the PBX call id
+  // and only falling back to a narrow caller/time match.
+  // Priority: softphone disposition match > recording/answered leg > longest duration.
 
-  const DEDUP_WINDOW_MS = 3 * 60 * 1000;
-
-  function digitsOnly(s: string): string {
-    return String(s ?? "").replace(/\D/g, "");
-  }
+  const DEDUP_WINDOW_MS = 90 * 1000;
 
   type RawRow = (typeof rows)[0];
+  type DispositionAgent = { agentId: string; agentName: string };
+
+  function findDispositionForPbxId(pbxId: string): DispositionAgent | undefined {
+    for (const key of pbxDispositionLookupKeys(pbxId)) {
+      const exact = dispositionByLinkusId.get(key);
+      if (exact) return exact;
+    }
+    return [...dispositionByLinkusId.entries()].find(([key]) =>
+      pbxCallIdsCompatible(key, pbxId),
+    )?.[1];
+  }
+
+  function findDispositionForRow(row: RawRow): DispositionAgent | undefined {
+    const pbxId = pbxCallIdFromCallsRowId(row.id);
+    return pbxId ? findDispositionForPbxId(pbxId) : undefined;
+  }
 
   // Score a row so we can pick the best leg.
   // Higher = better. Disposition match is king, then answered+DID, then answered.
-  function rowScore(row: RawRow, disp: { agentId: string; agentName: string } | undefined): number {
+  function rowScore(row: RawRow, disp: DispositionAgent | undefined): number {
     let score = 0;
     if (disp) score += 1000;                         // softphone disposition found
     if (row.result === "answered") score += 100;
@@ -1090,35 +1130,67 @@ export async function fetchCalls(
     return score;
   }
 
-  /** Yeastar emits one CDR per leg; only the answered leg usually has `recording_url`. */
-  function recordingUrlFromCluster(cluster: RawRow[]): string | null {
-    for (const row of cluster) {
-      const url = row.recording_url?.trim();
-      if (url) return url;
-    }
-    return null;
+  function bestRecordingUrlFromCluster(
+    cluster: RawRow[],
+    clusterDisp: DispositionAgent | undefined,
+  ): string | null {
+    const recordingRow = cluster.reduce<RawRow | null>((best, row) => {
+      if (!row.recording_url?.trim()) return best;
+      if (!best) return row;
+      const rowDisp = findDispositionForRow(row) ?? clusterDisp;
+      const bestDisp = findDispositionForRow(best) ?? clusterDisp;
+      return rowScore(row, rowDisp) > rowScore(best, bestDisp) ? row : best;
+    }, null);
+    return recordingRow?.recording_url?.trim() || null;
+  }
+
+  function pbxClusterKey(row: RawRow): string | null {
+    const pbxId = pbxCallIdFromCallsRowId(row.id);
+    const cleaned = pbxId ? cleanPbxCallId(pbxId) : "";
+    return cleaned ? `pbx:${cleaned}` : null;
+  }
+
+  function numbersLikelySame(a: string, b: string): boolean {
+    const da = digitsOnlyText(a);
+    const db = digitsOnlyText(b);
+    if (!da || !db) return false;
+    return da === db || da.endsWith(db) || db.endsWith(da);
+  }
+
+  function optionalNumbersCompatible(a?: string | null, b?: string | null): boolean {
+    const da = digitsOnlyText(a ?? "");
+    const db = digitsOnlyText(b ?? "");
+    if (!da || !db) return true;
+    return da === db || da.endsWith(db) || db.endsWith(da);
+  }
+
+  function rowsLikelySameCall(a: RawRow, b: RawRow): boolean {
+    const aKey = pbxClusterKey(a);
+    const bKey = pbxClusterKey(b);
+    if (aKey && bKey && aKey === bKey) return true;
+
+    const aMs = new Date(a.start_time).getTime();
+    const bMs = new Date(b.start_time).getTime();
+    if (!Number.isFinite(aMs) || !Number.isFinite(bMs)) return false;
+    if (Math.abs(aMs - bMs) > DEDUP_WINDOW_MS) return false;
+
+    return (
+      resolveCallDirectionFromRow(a) === resolveCallDirectionFromRow(b) &&
+      a.tenant_id === b.tenant_id &&
+      a.queue_id === b.queue_id &&
+      numbersLikelySame(a.caller_number, b.caller_number) &&
+      optionalNumbersCompatible(a.dialed_number, b.dialed_number)
+    );
   }
 
   // Build clusters: each cluster = one "real" call
   const clusters: RawRow[][] = [];
 
   for (const row of rows) {
-    const rowMs = new Date(row.start_time).getTime();
-    const rowNum = digitsOnly(row.caller_number);
-    const rowDir = row.direction ?? "inbound";
-
     let placed = false;
     for (const cluster of clusters) {
       const rep = cluster[0];
-      const repMs = new Date(rep.start_time).getTime();
-      const repNum = digitsOnly(rep.caller_number);
-      const repDir = rep.direction ?? "inbound";
-
-      if (
-        rowDir === repDir &&
-        (rowNum === repNum || repNum.endsWith(rowNum) || rowNum.endsWith(repNum)) &&
-        Math.abs(rowMs - repMs) <= DEDUP_WINDOW_MS
-      ) {
+      if (rowsLikelySameCall(row, rep)) {
         cluster.push(row);
         placed = true;
         break;
@@ -1130,35 +1202,19 @@ export async function fetchCalls(
   // Pick the best row from each cluster and keep track of the cluster-wide disposition
   const clusterData = clusters.map((cluster) => {
     // Find the disposition for any row in the cluster
-    const clusterDisp = cluster.reduce<{ agentId: string; agentName: string } | undefined>((found, r) => {
+    const clusterDisp = cluster.reduce<DispositionAgent | undefined>((found, r) => {
       if (found) return found;
-      const pbId = pbxCallIdFromCallsRowId(r.id);
-      if (!pbId) return undefined;
-      return (
-        dispositionByLinkusId.get(pbId) ??
-        dispositionByLinkusId.get(pbId.split("@")[0] ?? "") ??
-        [...dispositionByLinkusId.entries()].find(
-          ([k]) =>
-            k === pbId ||
-            k.endsWith(pbId) ||
-            pbId.endsWith(k) ||
-            k.replace(/\D/g, "") === pbId.replace(/\D/g, ""),
-        )?.[1]
-      );
+      return findDispositionForRow(r);
     }, undefined);
 
     const winner = cluster.reduce((best, row) => {
-      const rowPbId = pbxCallIdFromCallsRowId(row.id);
-      const rowDisp = rowPbId
-        ? (dispositionByLinkusId.get(rowPbId) ??
-          dispositionByLinkusId.get(rowPbId.split("@")[0] ?? ""))
-        : undefined;
+      const rowDisp = findDispositionForRow(row);
       return rowScore(row, rowDisp ?? clusterDisp) > rowScore(best, clusterDisp)
         ? row
         : best;
     });
 
-    const clusterRecording = recordingUrlFromCluster(cluster);
+    const clusterRecording = bestRecordingUrlFromCluster(cluster, clusterDisp);
     const winnerWithRecording =
       clusterRecording && !winner.recording_url?.trim()
         ? { ...winner, recording_url: clusterRecording }
@@ -1333,13 +1389,7 @@ async function fetchSoftphoneDispositionAgentMap(
   const cleanIds = rawCallIds
     .map((id) => pbxCallIdFromCallsRowId(id))
     .filter((id): id is string => Boolean(id))
-    .flatMap((id) => {
-      const parts = [id];
-      // Strip common suffixes: -ext, @pbx, _leg
-      const base = id.split("@")[0].split("-")[0].split("_")[0];
-      if (base && base !== id) parts.push(base);
-      return parts;
-    });
+    .flatMap(pbxDispositionLookupKeys);
 
   const uniqueIds = [...new Set(cleanIds)];
   if (uniqueIds.length === 0) return new Map();

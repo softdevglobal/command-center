@@ -337,11 +337,17 @@ export function OverviewTab({
   const visibleQueues = useMemo(
     () =>
       queues
-        .filter(
-          (q) =>
+        .filter((q) => {
+          const isAllowed =
             permissions.allowedQueueIds.length === 0 ||
-            permissions.allowedQueueIds.includes(q.id),
-        )
+            permissions.allowedQueueIds.includes(q.id);
+          if (!isAllowed) return false;
+
+          if (!isBlueQueue(q)) return true;
+
+          const detail = queueCallDetails.get(q.id);
+          return Boolean(detail) || q.activeCalls > 0 || q.waitingCalls > 0;
+        })
         .sort((a, b) => {
           const aPri =
             Boolean(queueCallDetails.get(a.id)?.isIncoming) ||
@@ -652,6 +658,20 @@ function buildLiveOrIncomingDetail(
 
 function normalizeNumber(phone: string | null | undefined): string {
   return (phone ?? "").replace(/\D/g, "");
+}
+
+function isBlueQueue(queue: Pick<Queue, "id" | "name" | "type">): boolean {
+  return [queue.id, queue.name, queue.type].some((value) =>
+    hasQueueToken(value, "blue"),
+  );
+}
+
+function hasQueueToken(value: string | null | undefined, token: string): boolean {
+  const normalized = String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  return normalized.split(/\s+/).includes(token);
 }
 
 function findIncomingCallForAgent(

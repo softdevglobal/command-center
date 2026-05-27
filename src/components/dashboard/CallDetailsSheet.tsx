@@ -1,12 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { CalendarCheck } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import {
   CalendarPlus2,
   CarFront,
   History,
+  Loader2,
   Mail,
   MapPin,
+  Send,
+  StickyNote,
   UserRound,
   Wrench,
 } from "lucide-react";
@@ -33,6 +36,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/dashboard/EmptyState";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Sheet,
   SheetContent,
@@ -41,16 +45,21 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useAuth } from "@/hooks/useAuth";
+import { sendBlueCallNote } from "@/services/blueNotesApi";
 
 type CallSheetMode = "incoming" | "live";
+export type CallQueueKind = "black" | "blue";
 
 export interface CallDetailSnapshot {
   id: string;
   mode: CallSheetMode;
   tenantId: string;
+  queueId: string;
   workshopName: string;
   workshopColor: string;
   queueName: string;
+  queueKind: CallQueueKind;
   agentOrGroupLabel: string;
   customerName: string | null;
   customerPhone: string;
@@ -76,7 +85,14 @@ export function restoreCallDetailFromSession(): CallDetailSnapshot | null {
   try {
     const raw = sessionStorage.getItem(CALL_DETAIL_STORAGE_KEY);
     if (!raw) return null;
-    return JSON.parse(raw) as CallDetailSnapshot;
+    const detail = JSON.parse(raw) as CallDetailSnapshot;
+    return {
+      ...detail,
+      queueId: detail.queueId ?? "",
+      queueKind:
+        detail.queueKind ??
+        detectCallQueueKind({ id: detail.queueId, name: detail.queueName }),
+    };
   } catch {
     return null;
   }
@@ -94,6 +110,23 @@ interface CallDetailsSheetProps {
   onOpenChange: (open: boolean) => void;
 }
 
+function detectCallQueueKind(input: {
+  id?: string | null;
+  name?: string | null;
+  type?: string | null;
+}): CallQueueKind {
+  const values = [input.id, input.name, input.type];
+  return values.some((value) => hasQueueToken(value, "blue")) ? "blue" : "black";
+}
+
+function hasQueueToken(value: string | null | undefined, token: string): boolean {
+  const normalized = String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  return normalized.split(/\s+/).includes(token);
+}
+
 export function buildIncomingCallSnapshot(
   call: IncomingCall,
   now: number,
@@ -103,9 +136,14 @@ export function buildIncomingCallSnapshot(
     id: call.id,
     mode: "incoming",
     tenantId: call.tenantId,
+    queueId: call.queueId,
     workshopName: call.tenantName,
     workshopColor: call.tenantBrandColor,
     queueName: call.queueName,
+    queueKind: detectCallQueueKind({
+      id: call.queueId,
+      name: call.queueName,
+    }),
     agentOrGroupLabel: `Group: ${call.groupName}`,
     customerPhone: call.callerNumber,
     customerName: call.callerName,
@@ -132,14 +170,22 @@ export function buildLiveCallSnapshot(args: {
   const activeNumber = agent.currentCaller || incomingCall?.callerNumber || "";
   const queue = queues.find((entry) => agent.queueIds.includes(entry.id));
   const tenant = tenants.find((entry) => entry.id === agent.tenantId);
+  const queueId = incomingCall?.queueId || queue?.id || agent.queueIds[0] || "";
+  const queueName = incomingCall?.queueName || queue?.name || agent.queueName || "Live Queue";
 
   return {
     id: agent.id,
     mode: "live",
     tenantId: agent.tenantId,
+    queueId,
     workshopName: tenant?.name || agent.tenantName || "Workshop",
     workshopColor: tenant?.brandColor || "var(--cc-color-cyan)",
-    queueName: queue?.name || agent.queueName || "Live Queue",
+    queueName,
+    queueKind: detectCallQueueKind({
+      id: queueId,
+      name: queueName,
+      type: queue?.type,
+    }),
     agentOrGroupLabel: `Agent: ${agent.name}${agent.extension ? ` ? Ext ${agent.extension}` : ""}`,
     customerPhone: activeNumber,
     customerName: incomingCall?.callerName ?? null,
@@ -163,6 +209,7 @@ export function CallDetailsSheet({
   onOpenChange,
 }: CallDetailsSheetProps) {
   const navigate = useNavigate();
+  const { session } = useAuth();
   const [callerContext, setCallerContext] = useState<CallerContext | null>(
     null,
   );
@@ -177,6 +224,10 @@ export function CallDetailsSheet({
   const [branchServicesLoading, setBranchServicesLoading] = useState(false);
   const [mappedDetail, setMappedDetail] = useState<Partial<CallDetailSnapshot> | null>(null);
   const [mappingLoading, setMappingLoading] = useState(false);
+  const [blueNote, setBlueNote] = useState("");
+  const [blueNoteSending, setBlueNoteSending] = useState(false);
+  const [blueNoteMessage, setBlueNoteMessage] = useState<string | null>(null);
+  const [blueNoteError, setBlueNoteError] = useState<string | null>(null);
   const commandButtons = useMemo(
     () => [
       { label: "Book Now", icon: CalendarPlus2 },
@@ -198,8 +249,11 @@ export function CallDetailsSheet({
         mappedDetail.mappingWorkshopName || detail.mappingWorkshopName,
       ownerId: mappedDetail.ownerId || detail.ownerId,
       tenantId: mappedDetail.tenantId || detail.tenantId,
+      queueKind: detail.queueKind,
     };
   }, [detail, mappedDetail]);
+
+  const isBlueDetail = effectiveDetail?.queueKind === "blue";
 
   useEffect(() => {
     let cancelled = false;
@@ -269,13 +323,14 @@ export function CallDetailsSheet({
     detail?.id,
     detail?.ownerId,
     detail?.tenantId,
+    detail,
     open,
   ]);
 
   useEffect(() => {
     let cancelled = false;
 
-    if (!open || !effectiveDetail?.customerPhone) {
+    if (!open || !effectiveDetail?.customerPhone || isBlueDetail) {
       setCallerContext(null);
       setMatchedAgent(null);
       setContextError(null);
@@ -328,13 +383,19 @@ export function CallDetailsSheet({
     effectiveDetail?.tenantId,
     effectiveDetail?.ownerId,
     effectiveDetail?.customerPhone,
+    isBlueDetail,
     open,
   ]);
 
   useEffect(() => {
     let cancelled = false;
 
-    if (!open || !effectiveDetail?.branchId || !effectiveDetail?.ownerId) {
+    if (
+      !open ||
+      isBlueDetail ||
+      !effectiveDetail?.branchId ||
+      !effectiveDetail?.ownerId
+    ) {
       setBranchServices(null);
       setBranchServicesLoading(false);
       return () => {
@@ -358,7 +419,15 @@ export function CallDetailsSheet({
     return () => {
       cancelled = true;
     };
-  }, [effectiveDetail?.branchId, effectiveDetail?.ownerId, open]);
+  }, [effectiveDetail?.branchId, effectiveDetail?.ownerId, isBlueDetail, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    setBlueNote("");
+    setBlueNoteMessage(null);
+    setBlueNoteError(null);
+    setBlueNoteSending(false);
+  }, [detail?.id, open]);
 
 
   const resolvedCustomerName =
@@ -369,9 +438,11 @@ export function CallDetailsSheet({
     callerContext?.customer.email || matchedAgent?.email || "";
   const availableVehicles = callerContext?.vehicles || [];
   const hasKnownProfile = Boolean(callerContext) || Boolean(matchedAgent);
-  const statusTone = hasKnownProfile
-    ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
-    : "bg-slate-100 text-slate-700 ring-1 ring-slate-200";
+  const statusTone = isBlueDetail
+    ? "bg-blue-50 text-blue-700 ring-1 ring-blue-200"
+    : hasKnownProfile
+      ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+      : "bg-slate-100 text-slate-700 ring-1 ring-slate-200";
   const matchedAgentWorkshop =
     matchedAgent?.tenantName ||
     effectiveDetail?.mappingWorkshopName ||
@@ -380,15 +451,65 @@ export function CallDetailsSheet({
   const matchedAgentRoleLabel = matchedAgent
     ? formatMatchedAgentRole(matchedAgent)
     : "";
-  const statusLabel = callerContext
-    ? "Known Customer"
-    : matchedAgent
-      ? "Command Centre Agent"
-      : contextLoading
-        ? "Searching..."
-        : "Unknown Caller";
+  const statusLabel = isBlueDetail
+    ? "Blue Queue"
+    : callerContext
+      ? "Known Customer"
+      : matchedAgent
+        ? "Command Centre Agent"
+        : contextLoading
+          ? "Searching..."
+          : "Unknown Caller";
   if (!effectiveDetail) return null;
   const activeDetail = effectiveDetail;
+  const isBlueCall = activeDetail.queueKind === "blue";
+  const businessName =
+    (activeDetail.mappingWorkshopName || activeDetail.workshopName || "Unknown business") +
+    (activeDetail.branchName ? ` - ${activeDetail.branchName}` : "");
+
+  async function handleBlueNoteSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!isBlueCall) return;
+
+    const note = blueNote.trim();
+    if (!note) {
+      setBlueNoteError("Add a note before sending.");
+      setBlueNoteMessage(null);
+      return;
+    }
+
+    setBlueNoteSending(true);
+    setBlueNoteError(null);
+    setBlueNoteMessage(null);
+
+    try {
+      await sendBlueCallNote({
+        callId: activeDetail.id,
+        customerName: resolvedCustomerName,
+        businessName,
+        callerNumber: activeDetail.customerPhone,
+        did: activeDetail.did || activeDetail.didLabel,
+        didLabel: activeDetail.didLabel,
+        queueId: activeDetail.queueId,
+        queueName: activeDetail.queueName,
+        tenantId: activeDetail.tenantId,
+        ownerId: activeDetail.ownerId || null,
+        branchId: activeDetail.branchId || null,
+        branchName: activeDetail.branchName || null,
+        agentUserId: session?.userId ?? null,
+        agentName: session?.displayName ?? null,
+        note,
+      });
+      setBlueNote("");
+      setBlueNoteMessage("Note sent to the Blue business admin.");
+    } catch (err) {
+      setBlueNoteError(
+        err instanceof Error ? err.message : "Failed to send Blue note.",
+      );
+    } finally {
+      setBlueNoteSending(false);
+    }
+  }
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -427,7 +548,7 @@ export function CallDetailsSheet({
             </SheetHeader>
 
             <div className="space-y-6 p-6">
-              {matchedAgent ? (
+              {!isBlueCall && matchedAgent ? (
                 <Card className="border-sky-200 bg-sky-50/40 shadow-sm ring-1 ring-sky-100">
                   <CardHeader className="pb-3">
                     <CardTitle className="text-base text-sky-950">
@@ -467,11 +588,13 @@ export function CallDetailsSheet({
                 <CardContent className="grid gap-4 p-6 md:grid-cols-2">
                   <div>
                     <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-slate-500">
-                      Workshop / Branch
+                      {isBlueCall ? "Business" : "Workshop / Branch"}
                     </div>
                     <div className="mt-2 text-lg font-semibold text-slate-950">
-                      {(activeDetail.mappingWorkshopName || activeDetail.workshopName) +
-                        (activeDetail.branchName ? ` - ${activeDetail.branchName}` : "")}
+                      {isBlueCall
+                        ? businessName
+                        : (activeDetail.mappingWorkshopName || activeDetail.workshopName) +
+                          (activeDetail.branchName ? ` - ${activeDetail.branchName}` : "")}
                     </div>
                     <div className="mt-1 text-sm text-slate-600">
                       {activeDetail.queueName}
@@ -490,10 +613,10 @@ export function CallDetailsSheet({
                   </div>
                   <div>
                     <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-slate-500">
-                      Profile Status
+                      {isBlueCall ? "Queue" : "Profile Status"}
                     </div>
                     <div className="mt-2 text-sm font-medium text-slate-900">
-                      {statusLabel}
+                      {isBlueCall ? activeDetail.queueName : statusLabel}
                     </div>
                   </div>
                   <div>
@@ -501,7 +624,14 @@ export function CallDetailsSheet({
                       Line / DID
                     </div>
                     <div className="mt-2 text-sm font-medium text-slate-900">
-                      {activeDetail.didLabel}
+                      {activeDetail.did || activeDetail.didLabel}
+                      {activeDetail.did &&
+                      activeDetail.didLabel &&
+                      activeDetail.didLabel !== activeDetail.did ? (
+                        <span className="ml-2 text-slate-500">
+                          ({activeDetail.didLabel})
+                        </span>
+                      ) : null}
                       {mappingLoading ? (
                         <span className="ml-2 text-xs text-slate-400">
                           loading mapping...
@@ -509,7 +639,7 @@ export function CallDetailsSheet({
                       ) : null}
                     </div>
                   </div>
-                  {activeDetail.ownerId && (
+                  {!isBlueCall && activeDetail.ownerId && (
                     <div>
                       <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-slate-500">
                         Owner ID
@@ -519,7 +649,7 @@ export function CallDetailsSheet({
                       </div> */}
                     </div>
                   )}
-                  {callerContext?.customer.email && (
+                  {!isBlueCall && callerContext?.customer.email && (
                     <div>
                       <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-slate-500">
                         Email
@@ -530,7 +660,7 @@ export function CallDetailsSheet({
                       </div>
                     </div>
                   )}
-                  {callerContext?.customer.address && (
+                  {!isBlueCall && callerContext?.customer.address && (
                     <div>
                       <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-slate-500">
                         Address
@@ -544,166 +674,222 @@ export function CallDetailsSheet({
                 </CardContent>
               </Card>
 
-              {callerContext?.customer.notes && (
-                <Card className="border-slate-200 bg-white shadow-sm">
-                  <CardHeader className="pb-3">
-                    <CardTitle className="text-base">Customer Notes</CardTitle>
-                  </CardHeader>
-                  <CardContent className="pt-0 text-sm text-slate-700">
-                    {callerContext.customer.notes}
-                  </CardContent>
-                </Card>
-              )}
-
-
-              <Card className="border-slate-200 bg-white shadow-sm">
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-base">System Commands</CardTitle>
-                </CardHeader>
-                <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                  {commandButtons.map((command) => {
-                    const Icon = command.icon;
-                    return (
-                      <Button
-                        key={command.label}
-                        variant={
-                          command.label === "Book Now" ? "default" : "outline"
-                        }
-                        className="justify-start"
-                        disabled={
-                          (command.label === "Book Now" ||
-                            command.label === "Booking Details") &&
-                          (mappingLoading ||
-                            !activeDetail.ownerId ||
-                            !activeDetail.branchId)
-                        }
-                        onClick={() => {
-                          if (command.label === "Book Now") {
-                            saveCallDetailToSession(activeDetail);
-                            navigate("/booking", {
-                              state: {
-                                tenantId: activeDetail.tenantId ?? "",
-                                customerId: callerContext?.customer.id ?? null,
-                                customerName: resolvedCustomerName ?? "",
-                                customerPhone: activeDetail.customerPhone ?? "",
-                                customerEmail: resolvedCustomerEmail ?? "",
-                                availableVehicles: availableVehicles,
-                                workshopName:
-                                  activeDetail.mappingWorkshopName ||
-                                  activeDetail.workshopName ||
-                                  "",
-                                workshopColor: activeDetail.workshopColor ?? "",
-                                branchId: activeDetail.branchId ?? "",
-                                ownerId: activeDetail.ownerId ?? "",
-                              },
-                            });
-                            return;
-                          }
-                          if (command.label === "Booking Details") {
-                            saveCallDetailToSession(activeDetail);
-                            navigate("/bookings/dashboard", {
-                              state: {
-                                ownerId: activeDetail.ownerId ?? "",
-                                branchId: activeDetail.branchId ?? "",
-                              },
-                            });
-                            return;
-                          }
-                        }}
-                      >
-                        <Icon className="h-4 w-4" />
-                        {command.label}
-                      </Button>
-                    );
-                  })}
-                </CardContent>
-              </Card>
-
-              <Tabs defaultValue="vehicles" className="space-y-4">
-                <TabsList className="grid h-auto grid-cols-2 rounded-xl bg-slate-200/70 p-1">
-                  <TabsTrigger value="vehicles" className="rounded-lg">
-                    Vehicles &amp; History
-                  </TabsTrigger>
-                  <TabsTrigger value="branch-services" className="rounded-lg">
-                    Branch Services
-                  </TabsTrigger>
-                </TabsList>
-
-                <TabsContent value="vehicles" className="mt-0">
-                  {contextLoading ? (
-                    <Card className="border-slate-200 bg-white shadow-sm">
-                      <CardContent className="p-5 text-sm text-slate-600">
-                        Loading caller vehicles and history...
-                      </CardContent>
-                    </Card>
-                  ) : callerContext?.vehicles.length ? (
-                    <div className="space-y-4">
-                      {callerContext.vehicles.map((vehicle) => {
-                        const vehicleServices = (callerContext.services || []).filter(
-                          (s) => s.vehicleId === vehicle.id,
-                        );
-                        return (
-                          <VehicleCard
-                            key={vehicle.id}
-                            vehicle={vehicle}
-                            services={vehicleServices}
-                          />
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <Card className="border-slate-200 bg-white shadow-sm">
-                      <CardContent className="p-5">
-                        <EmptyState
-                          message={
-                            contextError ||
-                            "No vehicles found for this caller yet."
-                          }
+              {isBlueCall ? (
+                <>
+                  <Card className="border-blue-200 bg-white shadow-sm ring-1 ring-blue-100">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="flex items-center gap-2 text-base text-blue-950">
+                        <StickyNote className="h-4 w-4 text-blue-600" />
+                        Blue call note
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <form className="space-y-4" onSubmit={handleBlueNoteSubmit}>
+                        <Textarea
+                          value={blueNote}
+                          onChange={(event) => {
+                            setBlueNote(event.target.value);
+                            setBlueNoteError(null);
+                            setBlueNoteMessage(null);
+                          }}
+                          placeholder="Type notes for the Blue business admin..."
+                          className="min-h-[180px] resize-y bg-white"
+                          disabled={blueNoteSending}
                         />
+                        {blueNoteError ? (
+                          <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                            {blueNoteError}
+                          </div>
+                        ) : null}
+                        {blueNoteMessage ? (
+                          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                            {blueNoteMessage}
+                          </div>
+                        ) : null}
+                        <Button
+                          type="submit"
+                          className="bg-blue-600 text-white hover:bg-blue-700"
+                          disabled={blueNoteSending}
+                        >
+                          {blueNoteSending ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Send className="h-4 w-4" />
+                          )}
+                          Send to Blue admin
+                        </Button>
+                      </form>
+                    </CardContent>
+                  </Card>
+
+                  <div className="rounded-2xl border border-dashed border-blue-200 bg-blue-50/60 px-4 py-3 text-sm text-blue-900">
+                    This Blue queue view is notes-only. Booking commands and
+                    booking history are hidden for this queue.
+                  </div>
+                </>
+              ) : (
+                <>
+                  {callerContext?.customer.notes && (
+                    <Card className="border-slate-200 bg-white shadow-sm">
+                      <CardHeader className="pb-3">
+                        <CardTitle className="text-base">Customer Notes</CardTitle>
+                      </CardHeader>
+                      <CardContent className="pt-0 text-sm text-slate-700">
+                        {callerContext.customer.notes}
                       </CardContent>
                     </Card>
                   )}
-                </TabsContent>
 
-                <TabsContent value="branch-services" className="mt-0">
                   <Card className="border-slate-200 bg-white shadow-sm">
-                    <CardContent className="space-y-4 p-5">
-                      {branchServicesLoading ? (
-                        <div className="text-sm text-slate-600">
-                          Loading branch services...
-                        </div>
-                      ) : branchServices?.length ? (
-                        <div className="grid gap-3 sm:grid-cols-2">
-                          {branchServices.map((service) => (
-                            <div
-                              key={service.id}
-                              className="rounded-xl border border-slate-200 bg-slate-50 p-4"
-                            >
-                              <div className="font-semibold text-slate-900">
-                                {service.name}
-                              </div>
-                              <div className="mt-1 flex items-center gap-2 text-sm text-slate-600">
-                                <span>{service.duration} mins</span>
-                                <div className="h-1 w-1 rounded-full bg-slate-300" />
-                                <span>${service.price}</span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <EmptyState message="No services found for this branch." />
-                      )}
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-base">System Commands</CardTitle>
+                    </CardHeader>
+                    <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                      {commandButtons.map((command) => {
+                        const Icon = command.icon;
+                        return (
+                          <Button
+                            key={command.label}
+                            variant={
+                              command.label === "Book Now" ? "default" : "outline"
+                            }
+                            className="justify-start"
+                            disabled={
+                              (command.label === "Book Now" ||
+                                command.label === "Booking Details") &&
+                              (mappingLoading ||
+                                !activeDetail.ownerId ||
+                                !activeDetail.branchId)
+                            }
+                            onClick={() => {
+                              if (command.label === "Book Now") {
+                                saveCallDetailToSession(activeDetail);
+                                navigate("/booking", {
+                                  state: {
+                                    tenantId: activeDetail.tenantId ?? "",
+                                    customerId: callerContext?.customer.id ?? null,
+                                    customerName: resolvedCustomerName ?? "",
+                                    customerPhone: activeDetail.customerPhone ?? "",
+                                    customerEmail: resolvedCustomerEmail ?? "",
+                                    availableVehicles: availableVehicles,
+                                    workshopName:
+                                      activeDetail.mappingWorkshopName ||
+                                      activeDetail.workshopName ||
+                                      "",
+                                    workshopColor: activeDetail.workshopColor ?? "",
+                                    branchId: activeDetail.branchId ?? "",
+                                    ownerId: activeDetail.ownerId ?? "",
+                                  },
+                                });
+                                return;
+                              }
+                              if (command.label === "Booking Details") {
+                                saveCallDetailToSession(activeDetail);
+                                navigate("/bookings/dashboard", {
+                                  state: {
+                                    ownerId: activeDetail.ownerId ?? "",
+                                    branchId: activeDetail.branchId ?? "",
+                                  },
+                                });
+                                return;
+                              }
+                            }}
+                          >
+                            <Icon className="h-4 w-4" />
+                            {command.label}
+                          </Button>
+                        );
+                      })}
                     </CardContent>
                   </Card>
-                </TabsContent>
-              </Tabs>
 
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-600">
-                Quick context: workshop vehicles and history come from Firebase
-                bookings for this number. The command-centre agent roster in
-                Supabase is also checked so internal or team calls match by
-                extension or roster phone.
-              </div>
+                  <Tabs defaultValue="vehicles" className="space-y-4">
+                    <TabsList className="grid h-auto grid-cols-2 rounded-xl bg-slate-200/70 p-1">
+                      <TabsTrigger value="vehicles" className="rounded-lg">
+                        Vehicles &amp; History
+                      </TabsTrigger>
+                      <TabsTrigger value="branch-services" className="rounded-lg">
+                        Branch Services
+                      </TabsTrigger>
+                    </TabsList>
+
+                    <TabsContent value="vehicles" className="mt-0">
+                      {contextLoading ? (
+                        <Card className="border-slate-200 bg-white shadow-sm">
+                          <CardContent className="p-5 text-sm text-slate-600">
+                            Loading caller vehicles and history...
+                          </CardContent>
+                        </Card>
+                      ) : callerContext?.vehicles.length ? (
+                        <div className="space-y-4">
+                          {callerContext.vehicles.map((vehicle) => {
+                            const vehicleServices = (callerContext.services || []).filter(
+                              (s) => s.vehicleId === vehicle.id,
+                            );
+                            return (
+                              <VehicleCard
+                                key={vehicle.id}
+                                vehicle={vehicle}
+                                services={vehicleServices}
+                              />
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <Card className="border-slate-200 bg-white shadow-sm">
+                          <CardContent className="p-5">
+                            <EmptyState
+                              message={
+                                contextError ||
+                                "No vehicles found for this caller yet."
+                              }
+                            />
+                          </CardContent>
+                        </Card>
+                      )}
+                    </TabsContent>
+
+                    <TabsContent value="branch-services" className="mt-0">
+                      <Card className="border-slate-200 bg-white shadow-sm">
+                        <CardContent className="space-y-4 p-5">
+                          {branchServicesLoading ? (
+                            <div className="text-sm text-slate-600">
+                              Loading branch services...
+                            </div>
+                          ) : branchServices?.length ? (
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              {branchServices.map((service) => (
+                                <div
+                                  key={service.id}
+                                  className="rounded-xl border border-slate-200 bg-slate-50 p-4"
+                                >
+                                  <div className="font-semibold text-slate-900">
+                                    {service.name}
+                                  </div>
+                                  <div className="mt-1 flex items-center gap-2 text-sm text-slate-600">
+                                    <span>{service.duration} mins</span>
+                                    <div className="h-1 w-1 rounded-full bg-slate-300" />
+                                    <span>${service.price}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <EmptyState message="No services found for this branch." />
+                          )}
+                        </CardContent>
+                      </Card>
+                    </TabsContent>
+                  </Tabs>
+
+                  <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-600">
+                    Quick context: workshop vehicles and history come from Firebase
+                    bookings for this number. The command-centre agent roster in
+                    Supabase is also checked so internal or team calls match by
+                    extension or roster phone.
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </ScrollArea>
