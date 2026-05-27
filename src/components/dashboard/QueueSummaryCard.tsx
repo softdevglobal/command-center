@@ -77,6 +77,7 @@ export function QueueSummaryCard({
   const showCallerRows =
     Boolean(incomingCallers?.length) &&
     (isIncoming || showLive || showEndedCallerRecall);
+  const shouldScrollCallerRows = incomingCount > 3;
 
   const stats = [
     {
@@ -213,7 +214,13 @@ export function QueueSummaryCard({
 
         {/* Callers List (Incoming or Answered/Live) */}
         {showCallerRows && (
-          <div className="flex flex-col gap-2">
+          <div
+            className={`flex flex-col gap-2 ${
+              shouldScrollCallerRows
+                ? 'max-h-[13rem] overflow-y-auto pr-1'
+                : ''
+            }`}
+          >
             {incomingCallers.map((caller, i) => {
               const openDetail = caller.detail && onIncomingCallerClick;
               
@@ -290,7 +297,7 @@ export function QueueSummaryCard({
                         }
                       : undefined
                   }
-                  className={`relative overflow-hidden rounded-xl ${cardBg} p-2.5 ring-1 shadow-sm transition-all ${
+                  className={`relative min-h-[3.75rem] overflow-hidden rounded-xl ${cardBg} p-2.5 ring-1 shadow-sm transition-all ${
                     openDetail
                       ? `cursor-pointer ${hoverStyle} focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`
                       : nonHoverStyle
@@ -309,11 +316,11 @@ export function QueueSummaryCard({
                       <div className={`truncate text-[13px] font-bold ${textColor} leading-tight`}>
                         {caller.name || 'Unknown Caller'}
                       </div>
-                      <div className="mt-0.5 flex items-center justify-between gap-2">
-                        <div className={`truncate font-mono text-[11px] font-semibold ${subTextColor}`}>
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <div className={`min-w-[8rem] max-w-full truncate font-mono text-[12px] font-semibold ${subTextColor}`}>
                           {formatPhone(caller.number)}
                         </div>
-                        <div className={`shrink-0 rounded-md bg-white/70 px-1.5 py-0.5 font-mono text-[10px] font-bold ${badgeStyle} ring-1`}>
+                        <div className={`ml-auto shrink-0 rounded-md bg-white/70 px-1.5 py-0.5 font-mono text-[10px] font-bold ${badgeStyle} ring-1`}>
                           {isLiveCard ? (
                             'Answered'
                           ) : isEndedLinger ? (

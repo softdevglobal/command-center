@@ -774,7 +774,7 @@ export function SoftphoneWidget({
 
   return (
     <div
-      className="fixed bottom-5 right-5 z-50 flex flex-col items-end gap-2"
+      className="fixed bottom-5 right-5 z-[60] flex flex-col items-end gap-2"
       aria-label="Softphone"
     >
       {/* Expanded panel */}

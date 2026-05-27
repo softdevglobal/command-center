@@ -113,7 +113,7 @@ export function buildIncomingCallSnapshot(
     mappingWorkshopName: call.mappingWorkshopName ?? "",
     ownerId: call.ownerId ?? "",
     callStatusText: opts?.showAsEnded
-      ? "This call has ended; details stay available on the queue card briefly."
+      ? "This call has ended; details stay available on the queue card for 10 minutes."
       : `Incoming for ${formatDuration(now - call.waitingSince)}`,
   };
 }
@@ -293,7 +293,7 @@ export function CallDetailsSheet({
   if (!detail) return null;
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
+    <Sheet modal={false} open={open} onOpenChange={onOpenChange}>
       <SheetContent
         side="right"
         className="w-full border-l border-slate-200 bg-slate-50 p-0 sm:max-w-2xl"
