@@ -95,6 +95,7 @@ interface UseLinkusSdkOptions {
 
 const AUDIO_ELEMENT_ID = '__softphone_remote_audio__';
 const RINGTONE_ELEMENT_ID = '__softphone_ringtone__';
+const SOFTPHONE_RINGTONE_SRC = `${import.meta.env.BASE_URL}ringtone.mp3`;
 
 function getOrCreateAudio(): HTMLAudioElement {
   let el = document.getElementById(AUDIO_ELEMENT_ID) as HTMLAudioElement | null;
@@ -113,11 +114,17 @@ function getOrCreateRingtone(): HTMLAudioElement {
   if (!el) {
     el = document.createElement('audio');
     el.id = RINGTONE_ELEMENT_ID;
-    el.src = ''; // Expecting a ringtone file in the public/ folder
-    el.loop = true;
     el.style.cssText = 'position:absolute;width:0;height:0;opacity:0;pointer-events:none;';
     document.body.appendChild(el);
   }
+  if (el.getAttribute('src') !== SOFTPHONE_RINGTONE_SRC) {
+    el.src = SOFTPHONE_RINGTONE_SRC;
+    el.load();
+  }
+  el.loop = true;
+  el.preload = 'auto';
+  el.muted = false;
+  el.volume = 1;
   return el;
 }
 
@@ -174,8 +181,6 @@ export function useLinkusSDK({
   );
   const [incomingCallIds, setIncomingCallIds] = useState<string[]>([]);
   const [isRegistered, setIsRegistered] = useState(false);
-  const incomingCallIdsRef = useRef<string[]>([]);
-  incomingCallIdsRef.current = incomingCallIds;
 
   const phoneRef = useRef<PhoneOperator | null>(null);
   const pbxRef = useRef<PBXOperator | null>(null);
@@ -194,23 +199,59 @@ export function useLinkusSDK({
     });
   }, [incomingCallIds, activeCalls, isRegistered]);
 
+  // Prime ringtone audio after the first user gesture. Browsers often block
+  // unprompted ring audio unless the page has already played audio once.
+  useEffect(() => {
+    if (!agentEmail) return;
+
+    const primeRingtone = () => {
+      const ringtone = getOrCreateRingtone();
+      ringtone.muted = true;
+      ringtone
+        .play()
+        .then(() => {
+          ringtone.pause();
+          ringtone.currentTime = 0;
+        })
+        .catch(() => {
+          // The real ring path below still retries on click/keydown if needed.
+        })
+        .finally(() => {
+          ringtone.muted = false;
+        });
+    };
+
+    document.addEventListener('pointerdown', primeRingtone, { once: true });
+    document.addEventListener('keydown', primeRingtone, { once: true });
+
+    return () => {
+      document.removeEventListener('pointerdown', primeRingtone);
+      document.removeEventListener('keydown', primeRingtone);
+    };
+  }, [agentEmail]);
+
   // Manage ringtone playback
   useEffect(() => {
     let retryPlay: (() => void) | null = null;
 
     if (incomingCallIds.length > 0) {
       const ringtone = getOrCreateRingtone();
+      ringtone.currentTime = 0;
       ringtone.play().catch((err) => {
         console.warn('[useLinkusSDK] Autoplay blocked for ringtone:', err);
         // Wait for user interaction to unblock audio
         retryPlay = () => {
+          ringtone.muted = false;
+          ringtone.volume = 1;
           ringtone.play().catch(e => console.warn('[useLinkusSDK] Retry failed:', e));
           if (retryPlay) {
             document.removeEventListener('click', retryPlay);
+            document.removeEventListener('pointerdown', retryPlay);
             document.removeEventListener('keydown', retryPlay);
           }
         };
         document.addEventListener('click', retryPlay);
+        document.addEventListener('pointerdown', retryPlay);
         document.addEventListener('keydown', retryPlay);
       });
     } else {
@@ -220,6 +261,7 @@ export function useLinkusSDK({
     return () => {
       if (retryPlay) {
         document.removeEventListener('click', retryPlay);
+        document.removeEventListener('pointerdown', retryPlay);
         document.removeEventListener('keydown', retryPlay);
       }
     };
@@ -443,13 +485,6 @@ export function useLinkusSDK({
           session.on('ended', () => {
             if (cancelled) return;
             console.log('[useLinkusSDK] session ended', callId);
-            const snap = mapLinkusCallStatus(session.status);
-            if (snap.direction === 'inbound') {
-              dismissIncomingCallOnDashboard({
-                linkusCallId: callId,
-                callerNumber: snap.number?.trim() || undefined,
-              });
-            }
             emitSessionEnd(callId, session.status);
             removeCall(callId);
             if ((phoneRef.current?.sessions.size ?? 0) === 0) detachAudio();
@@ -458,13 +493,6 @@ export function useLinkusSDK({
           session.on('failed', (_info: unknown) => {
             if (cancelled) return;
             // console.log('[useLinkusSDK] session failed', callId, _info);
-            const snap = mapLinkusCallStatus(session.status);
-            if (snap.direction === 'inbound') {
-              dismissIncomingCallOnDashboard({
-                linkusCallId: callId,
-                callerNumber: snap.number?.trim() || undefined,
-              });
-            }
             emitSessionEnd(callId, session.status);
             removeCall(callId);
             if ((phoneRef.current?.sessions.size ?? 0) === 0) detachAudio();
@@ -492,17 +520,6 @@ export function useLinkusSDK({
           if (cancelled) return;
           console.log('[useLinkusSDK] deleteSession', callId);
           const last = lastSdkStatusRef.current.get(callId);
-          const inbound =
-            incomingCallIdsRef.current.includes(callId) ||
-            (last && mapLinkusCallStatus(last).direction === 'inbound');
-          if (inbound) {
-            dismissIncomingCallOnDashboard({
-              linkusCallId: callId,
-              callerNumber: last
-                ? mapLinkusCallStatus(last).number?.trim() || undefined
-                : undefined,
-            });
-          }
           if (last) emitSessionEnd(callId, last);
           removeCall(callId);
           if ((phoneRef.current?.sessions.size ?? 0) === 0) detachAudio();

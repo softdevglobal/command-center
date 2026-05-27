@@ -219,6 +219,7 @@ export function useDashboardData({
   >(() => new Map());
   const queueLingerInitRef = useRef(false);
   const prevIncomingByIdRef = useRef<Map<string, IncomingCall>>(new Map());
+  const skipQueueLingerForIdsRef = useRef<Set<string>>(new Set());
 
   const incomingCallsWithQueueLinger = useMemo(() => {
     const activeIds = new Set(incomingCalls.map((c) => c.id));
@@ -242,6 +243,7 @@ export function useDashboardData({
   useEffect(() => {
     queueLingerInitRef.current = false;
     prevIncomingByIdRef.current = new Map();
+    skipQueueLingerForIdsRef.current = new Set();
     setEndedIncomingLinger(new Map());
   }, [session?.userId, effectiveTenant]);
 
@@ -271,6 +273,7 @@ export function useDashboardData({
       }
       for (const [id, call] of prev) {
         if (!activeIds.has(id)) {
+          if (skipQueueLingerForIdsRef.current.delete(id)) continue;
           next.set(id, { call, endedAt: Date.now() });
         }
       }
@@ -342,12 +345,18 @@ export function useDashboardData({
     });
   }, [calls]);
 
-  // Evict stale calls
-  const STALE_INCOMING_MS = 45_000;
+  // Evict stale calls only after the same 10-minute queue-card retention window.
+  // Stale expiry is a cleanup path, not proof the call ended, so don't show it
+  // as an "Ended" linger row.
+  const STALE_INCOMING_MS = QUEUE_CARD_INCOMING_LINGER_MS;
   useEffect(() => {
     if (incomingCalls.length === 0) return;
     setIncomingCalls((prev) => {
-      const fresh = prev.filter((c) => (now - c.waitingSince) < STALE_INCOMING_MS);
+      const staleIds = prev
+        .filter((c) => (now - c.waitingSince) >= STALE_INCOMING_MS)
+        .map((c) => c.id);
+      staleIds.forEach((id) => skipQueueLingerForIdsRef.current.add(id));
+      const fresh = prev.filter((c) => !staleIds.includes(c.id));
       return fresh.length === prev.length ? prev : fresh;
     });
   }, [now]);
