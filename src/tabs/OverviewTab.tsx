@@ -58,7 +58,7 @@ interface OverviewTabProps {
   session?: UserSession | null;
   agentGroups?: AgentGroup[];
   incomingCalls?: IncomingCall[];
-  /** Merged list for queue cards only (includes ~40s post-end linger). Defaults to `incomingCalls`. */
+  /** Merged list for queue cards only (includes ~10 minutes post-end linger). Defaults to `incomingCalls`. */
   incomingCallsForQueueCards?: IncomingCall[];
   queueIncomingLingerEndedAt?: ReadonlyMap<string, number>;
   callDate?: string;

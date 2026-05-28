@@ -95,6 +95,7 @@ interface UseLinkusSdkOptions {
 
 const AUDIO_ELEMENT_ID = '__softphone_remote_audio__';
 const RINGTONE_ELEMENT_ID = '__softphone_ringtone__';
+const RINGTONE_SRC = `${import.meta.env.BASE_URL}ringtone.mp3`;
 
 function getOrCreateAudio(): HTMLAudioElement {
   let el = document.getElementById(AUDIO_ELEMENT_ID) as HTMLAudioElement | null;
@@ -113,7 +114,7 @@ function getOrCreateRingtone(): HTMLAudioElement {
   if (!el) {
     el = document.createElement('audio');
     el.id = RINGTONE_ELEMENT_ID;
-    el.src = ''; // Expecting a ringtone file in the public/ folder
+    el.src = RINGTONE_SRC;
     el.loop = true;
     el.style.cssText = 'position:absolute;width:0;height:0;opacity:0;pointer-events:none;';
     document.body.appendChild(el);

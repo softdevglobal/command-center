@@ -58,7 +58,7 @@ export interface DashboardData {
   agentGroups: AgentGroup[];
   agentOnboarding: AgentOnboarding[];
   incomingCalls: IncomingCall[];
-  /** Same as `incomingCalls` plus calls that recently left that list, kept ~40s for queue cards only. */
+  /** Same as `incomingCalls` plus calls that recently left that list, kept ~10 minutes for queue cards only. */
   incomingCallsWithQueueLinger: IncomingCall[];
   /** Call id → epoch ms when the call dropped out of `incomingCalls` (queue card “ended” badge). */
   queueIncomingLingerEndedAt: ReadonlyMap<string, number>;
@@ -78,7 +78,7 @@ const POLL_INTERVAL_AGENT_MS = 15000;
 const INCOMING_CALLS_STORAGE_KEY = "cc_incoming_calls_v1";
 const DASHBOARD_REFRESH_REQUEST_EVENT = "cc-dashboard-refresh-request";
 /** Keep ended / cleared incoming rows visible on overview queue cards only (not the floating monitor). */
-const QUEUE_CARD_INCOMING_LINGER_MS = 40_000;
+const QUEUE_CARD_INCOMING_LINGER_MS = 10 * 60_000;
 /** Ignore duplicate dismiss events for the same Linkus leg (reject + deleteSession). */
 const LINKUS_DISMISS_DEDUP_MS = 3500;
 

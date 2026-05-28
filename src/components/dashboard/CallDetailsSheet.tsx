@@ -512,7 +512,7 @@ export function CallDetailsSheet({
   }
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
+    <Sheet open={open} onOpenChange={onOpenChange} modal={false}>
       <SheetContent
         side="right"
         className="w-full border-l border-slate-200 bg-slate-50 p-0 sm:max-w-2xl"
