@@ -247,12 +247,19 @@ export interface AgentShiftSchedule {
   /** Supabase auth user id when the API includes it for agent-scoped reads. */
   userId?: string | null;
   monday: string | null;
+  mondayQueueId?: string | null;
   tuesday: string | null;
+  tuesdayQueueId?: string | null;
   wednesday: string | null;
+  wednesdayQueueId?: string | null;
   thursday: string | null;
+  thursdayQueueId?: string | null;
   friday: string | null;
+  fridayQueueId?: string | null;
   saturday: string | null;
+  saturdayQueueId?: string | null;
   sunday: string | null;
+  sundayQueueId?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }

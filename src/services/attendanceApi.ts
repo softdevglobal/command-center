@@ -60,6 +60,21 @@ const SHIFT_SCHEDULE_DAYS = [
   "sunday",
 ] as const;
 
+type ShiftScheduleDay = (typeof SHIFT_SCHEDULE_DAYS)[number];
+type ShiftScheduleQueueIdKey = `${ShiftScheduleDay}QueueId`;
+type ShiftSchedulePayload = Record<ShiftScheduleDay, string | null> &
+  Partial<Record<ShiftScheduleQueueIdKey, string | null>>;
+
+const SHIFT_SCHEDULE_QUEUE_ID_KEYS = {
+  monday: "mondayQueueId",
+  tuesday: "tuesdayQueueId",
+  wednesday: "wednesdayQueueId",
+  thursday: "thursdayQueueId",
+  friday: "fridayQueueId",
+  saturday: "saturdayQueueId",
+  sunday: "sundayQueueId",
+} satisfies Record<ShiftScheduleDay, ShiftScheduleQueueIdKey>;
+
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -178,10 +193,38 @@ function collectRows(raw: unknown, keys: readonly string[]): unknown[] {
 }
 
 function normalizeShiftScheduleValue(raw: unknown): string | null {
+  const nested = asRecord(raw);
+  if (Object.keys(nested).length > 0) {
+    return normalizeShiftScheduleValue(
+      nested.shift ?? nested.value ?? nested.hours ?? nested.time ?? nested.schedule,
+    );
+  }
   if (raw == null) return null;
   const text = String(raw).trim();
   if (!text || text.toUpperCase() === "OFF") return null;
   return text;
+}
+
+function normalizeShiftScheduleQueueId(raw: unknown): string | null {
+  if (raw == null) return null;
+  const text = String(raw).trim();
+  return text || null;
+}
+
+function readShiftScheduleQueueId(
+  row: Record<string, unknown>,
+  day: ShiftScheduleDay,
+): string | null {
+  const queueKey = SHIFT_SCHEDULE_QUEUE_ID_KEYS[day];
+  const direct = normalizeShiftScheduleQueueId(
+    row[queueKey] ?? row[`${day}_queue_id`] ?? row[`${day}Queue`] ?? row[`${day}_queue`],
+  );
+  if (direct) return direct;
+
+  const nestedDay = asRecord(row[day]);
+  return normalizeShiftScheduleQueueId(
+    nestedDay.queueId ?? nestedDay.queue_id ?? nestedDay.queue,
+  );
 }
 
 function normalizeAgentShiftSchedule(raw: unknown): AgentShiftSchedule {
@@ -194,12 +237,19 @@ function normalizeAgentShiftSchedule(raw: unknown): AgentShiftSchedule {
     agentId: resolvedAgentId,
     userId,
     monday: normalizeShiftScheduleValue(row.monday),
+    mondayQueueId: readShiftScheduleQueueId(row, "monday"),
     tuesday: normalizeShiftScheduleValue(row.tuesday),
+    tuesdayQueueId: readShiftScheduleQueueId(row, "tuesday"),
     wednesday: normalizeShiftScheduleValue(row.wednesday),
+    wednesdayQueueId: readShiftScheduleQueueId(row, "wednesday"),
     thursday: normalizeShiftScheduleValue(row.thursday),
+    thursdayQueueId: readShiftScheduleQueueId(row, "thursday"),
     friday: normalizeShiftScheduleValue(row.friday),
+    fridayQueueId: readShiftScheduleQueueId(row, "friday"),
     saturday: normalizeShiftScheduleValue(row.saturday),
+    saturdayQueueId: readShiftScheduleQueueId(row, "saturday"),
     sunday: normalizeShiftScheduleValue(row.sunday),
+    sundayQueueId: readShiftScheduleQueueId(row, "sunday"),
     createdAt: pickString(row, ["createdAt", "created_at"]) || undefined,
     updatedAt: pickString(row, ["updatedAt", "updated_at"]) || undefined,
   };
@@ -220,20 +270,25 @@ function extractShiftSchedules(raw: unknown): AgentShiftSchedule[] {
 
 function shiftSchedulePayload(
   schedule: Partial<AgentShiftSchedule>,
-): Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null> {
+): ShiftSchedulePayload {
   return SHIFT_SCHEDULE_DAYS.reduce(
     (payload, day) => {
-      payload[day] = normalizeShiftScheduleValue(schedule[day]);
+      const shiftValue = normalizeShiftScheduleValue(schedule[day]);
+      const queueKey = SHIFT_SCHEDULE_QUEUE_ID_KEYS[day];
+      payload[day] = shiftValue;
+      payload[queueKey] = shiftValue
+        ? normalizeShiftScheduleQueueId(schedule[queueKey])
+        : null;
       return payload;
     },
-    {} as Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null>,
+    {} as ShiftSchedulePayload,
   );
 }
 
 function extractShiftSchedule(
   raw: unknown,
   fallbackAgentId: string,
-  fallbackPayload: Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null>,
+  fallbackPayload: ShiftSchedulePayload,
 ): AgentShiftSchedule {
   const body = asRecord(raw);
   for (const key of ["agentShiftSchedule", "shiftSchedule", "schedule", "data", "item", "row", "result"]) {

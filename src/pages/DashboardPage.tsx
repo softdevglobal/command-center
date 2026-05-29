@@ -498,6 +498,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
                   session={session}
                   permissions={permissions}
                   agents={d.agents}
+                  queues={d.queues}
                   tenants={d.tenants}
                   now={d.now}
                   section={

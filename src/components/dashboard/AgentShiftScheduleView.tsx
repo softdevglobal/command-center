@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Agent, AgentShiftSchedule, UserSession } from "@/services/types";
+import { Agent, AgentShiftSchedule, Queue, UserSession } from "@/services/types";
 import { fetchMyShiftSchedule } from "@/services/attendanceApi";
 import {
   Card,
@@ -14,6 +14,7 @@ import { toast } from "@/hooks/use-toast";
 interface AgentShiftScheduleViewProps {
   session: UserSession;
   agents: Agent[];
+  queues: Queue[];
 }
 
 const DAYS = [
@@ -26,9 +27,23 @@ const DAYS = [
   "sunday",
 ] as const;
 
-export function AgentShiftScheduleView({ session, agents }: AgentShiftScheduleViewProps) {
+type ShiftDay = (typeof DAYS)[number];
+type ShiftDayQueueKey = `${ShiftDay}QueueId`;
+
+const QUEUE_ID_BY_DAY = {
+  monday: "mondayQueueId",
+  tuesday: "tuesdayQueueId",
+  wednesday: "wednesdayQueueId",
+  thursday: "thursdayQueueId",
+  friday: "fridayQueueId",
+  saturday: "saturdayQueueId",
+  sunday: "sundayQueueId",
+} satisfies Record<ShiftDay, ShiftDayQueueKey>;
+
+export function AgentShiftScheduleView({ session, agents, queues }: AgentShiftScheduleViewProps) {
   const [loading, setLoading] = useState(true);
   const [schedule, setSchedule] = useState<AgentShiftSchedule | null>(null);
+  const queueById = new Map(queues.map((queue) => [queue.id, queue]));
 
   useEffect(() => {
     async function load() {
@@ -79,6 +94,8 @@ export function AgentShiftScheduleView({ session, agents }: AgentShiftScheduleVi
       {DAYS.map((day) => {
         const value = schedule[day];
         const isOff = !value || value.toLowerCase() === "off";
+        const queueId = schedule[QUEUE_ID_BY_DAY[day]];
+        const queue = queueId ? queueById.get(queueId) : null;
         
         return (
           <Card key={day} className={isOff ? "opacity-60" : "border-primary/20 bg-primary/5"}>
@@ -93,7 +110,11 @@ export function AgentShiftScheduleView({ session, agents }: AgentShiftScheduleVi
                 {isOff ? "OFF" : value}
               </div>
               <CardDescription>
-                {isOff ? "Relax and recharge" : "Working hours"}
+                {isOff
+                  ? "Relax and recharge"
+                  : queue
+                    ? `Working ${queue.icon} ${queue.name}`
+                    : "Working hours"}
               </CardDescription>
             </CardContent>
           </Card>

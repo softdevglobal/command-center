@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useRef, useState, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useDashboard } from '@/context/DashboardDataContext';
 import { useCallNotification } from '@/context/CallNotificationContext';
@@ -14,7 +14,6 @@ import { Button } from '@/components/ui/button';
 export function GlobalCallMonitor() {
   const { incomingCalls, now } = useDashboard();
   const { selectedCall, setSelectedCall } = useCallNotification();
-  const lastAutoOpenedCallIdRef = useRef<string | null>(null);
 
   // Position state for the draggable card
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -54,23 +53,6 @@ export function GlobalCallMonitor() {
   };
 
   const showFloatingCard = incomingCalls.length > 0;
-
-  useEffect(() => {
-    if (isBookingPage) return;
-    const latestCall = incomingCalls[0];
-    if (!latestCall) return;
-
-    if (selectedCall?.id === latestCall.id) {
-      lastAutoOpenedCallIdRef.current = latestCall.id;
-      setSelectedCall(buildIncomingCallSnapshot(latestCall, now));
-      return;
-    }
-
-    if (lastAutoOpenedCallIdRef.current === latestCall.id) return;
-
-    lastAutoOpenedCallIdRef.current = latestCall.id;
-    setSelectedCall(buildIncomingCallSnapshot(latestCall, now));
-  }, [incomingCalls, isBookingPage, now, selectedCall?.id, setSelectedCall]);
 
   const longestWaitMs = useMemo(() => {
     if (incomingCalls.length === 0) return 0;
