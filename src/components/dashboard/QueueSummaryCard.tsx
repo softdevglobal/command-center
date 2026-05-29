@@ -1,4 +1,4 @@
-import type { Queue, Tenant } from '@/services/types';
+import type { IncomingCallStatus, Queue, Tenant } from '@/services/types';
 import { Card, CardContent } from '@/components/ui/card';
 import { PhoneIncoming, Clock, Users, PhoneCall, HeadphonesIcon, ChevronRight } from 'lucide-react';
 import { formatPhone } from '@/utils/formatters';
@@ -12,6 +12,7 @@ export interface IncomingCallerContext {
   detail?: CallDetailSnapshot;
   /** Epoch ms when the call left the live incoming list (queue card linger only). */
   endedAt?: number | null;
+  status?: IncomingCallStatus | null;
 }
 
 interface QueueSummaryCardProps {
@@ -223,8 +224,9 @@ export function QueueSummaryCard({
           >
             {incomingCallers.map((caller, i) => {
               const openDetail = caller.detail && onIncomingCallerClick;
-              
+
               const isLiveCard = showLive;
+              const status = caller.status ?? null;
               const isEndedLinger = !isLiveCard && caller.endedAt != null;
               
               const cardBg = isLiveCard
@@ -323,6 +325,12 @@ export function QueueSummaryCard({
                         <div className={`ml-auto shrink-0 rounded-md bg-white/70 px-1.5 py-0.5 font-mono text-[10px] font-bold ${badgeStyle} ring-1`}>
                           {isLiveCard ? (
                             'Answered'
+                          ) : status === 'answered' ? (
+                            'Answered'
+                          ) : status === 'ended' ? (
+                            'Ended'
+                          ) : status === 'ringing' ? (
+                            'Ringing'
                           ) : isEndedLinger ? (
                             'Ended'
                           ) : (

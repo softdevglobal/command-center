@@ -870,14 +870,89 @@ export async function fetchCallerContext(
 
 export { DASHBOARD_DISMISS_INCOMING_CALLER_EVENT } from "@/services/linkusCallLog";
 
-/**
- * Kept for backwards compat — returns empty array.
- * Use subscribeToIncomingCalls() for live data.
- */
-export async function fetchIncomingCalls(
-  _allowedQueueIds?: string[],
-): Promise<IncomingCall[]> {
-  return [];
+export type TempIncomingCallStatus = "ringing" | "answered" | "ended";
+
+export interface TempIncomingCallRow {
+  id: string;
+  did: string;
+  callerNumber: string;
+  status: TempIncomingCallStatus;
+  updatedAt: number;
+}
+
+export type TempIncomingCallChange =
+  | { type: "upsert"; row: TempIncomingCallRow }
+  | { type: "delete"; id: string };
+
+export async function fetchTempIncomingCallRows(): Promise<TempIncomingCallRow[]> {
+  const cutoffIso = new Date(Date.now() - 10 * 60_000).toISOString();
+  const { data, error } = await dynamicSupabase
+    .from("temp_incoming_calls")
+    .select("id,did,caller_number,status,updated_at")
+    .or(`status.neq.ended,updated_at.gt.${cutoffIso}`)
+    .order("updated_at", { ascending: false })
+    .limit(100);
+
+  if (error) {
+    console.warn("Temporary incoming call status fetch failed:", error.message);
+    return [];
+  }
+
+  return ((data ?? []) as Record<string, unknown>[]).map(mapTempIncomingCallRow);
+}
+
+export function subscribeToTempIncomingCallRows(
+  onChange: (change: TempIncomingCallChange) => void,
+): () => void {
+  const channel = supabase
+    .channel("temp-incoming-calls-status-cdc")
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "temp_incoming_calls",
+      },
+      (payload) => {
+        if (payload.eventType === "DELETE") {
+          const oldRow = (payload.old ?? {}) as Record<string, unknown>;
+          const id = String(oldRow.id ?? "");
+          if (id) onChange({ type: "delete", id });
+          return;
+        }
+
+        const row = mapTempIncomingCallRow(
+          (payload.new ?? {}) as Record<string, unknown>,
+        );
+        if (row.id) onChange({ type: "upsert", row });
+      },
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
+function mapTempIncomingCallRow(row: Record<string, unknown>): TempIncomingCallRow {
+  const status = String(row.status ?? "ringing").toLowerCase();
+  return {
+    id: String(row.id ?? ""),
+    did: String(row.did ?? ""),
+    callerNumber: String(row.caller_number ?? ""),
+    status:
+      status === "answered" || status === "ended"
+        ? status
+        : "ringing",
+    updatedAt: parseTempIncomingDateMs(row.updated_at) ?? Date.now(),
+  };
+}
+
+function parseTempIncomingDateMs(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const parsed = Date.parse(String(value));
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 /**
@@ -907,12 +982,16 @@ export function subscribeToIncomingCalls(
       }
     })
     .on("broadcast", { event: "CallHangup" }, ({ payload }) => {
-      // Call ended — remove from ringing list
-      onHangup?.(payload.id as string);
+      const id = typeof payload === "object" && payload && "id" in payload
+        ? String((payload as { id: unknown }).id ?? "")
+        : "";
+      if (id) onHangup?.(id);
     })
     .on("broadcast", { event: "CallAnswered" }, ({ payload }) => {
-      // Agent picked up — stop ringing immediately (don't wait for the CDR)
-      onHangup?.(payload.id as string);
+      const id = typeof payload === "object" && payload && "id" in payload
+        ? String((payload as { id: unknown }).id ?? "")
+        : "";
+      if (id) onHangup?.(id);
     })
     .subscribe();
 

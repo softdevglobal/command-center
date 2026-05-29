@@ -503,7 +503,7 @@ export interface DIDMapping {
   ownerId: string;
 }
 
-export type IncomingCallStatus = "ringing" | "queued";
+export type IncomingCallStatus = "ringing" | "queued" | "answered" | "ended";
 
 export interface IncomingCall {
   id: string;

@@ -152,6 +152,7 @@ export function OverviewTab({
           waitingSince?: number | null;
           detail?: CallDetailSnapshot;
           endedAt?: number | null;
+          status?: IncomingCall["status"] | null;
         }>;
       }
     >();
@@ -192,6 +193,7 @@ export function OverviewTab({
           waitingSince: c.waitingSince,
           detail: buildIncomingCallSnapshot(c, now, { showAsEnded }),
           endedAt: queueIncomingLingerEndedAt?.get(c.id) ?? null,
+          status: c.status ?? null,
         };
       };
 
@@ -279,7 +281,13 @@ export function OverviewTab({
           isLive: true,
           showEndedCallerRecall: false,
           incomingCallers: [
-            { number: cPhone, name: cName, waitingSince: null, detail },
+            {
+              number: cPhone,
+              name: cName,
+              waitingSince: null,
+              detail,
+              status: incomingMatch?.status ?? null,
+            },
           ],
         });
         continue;

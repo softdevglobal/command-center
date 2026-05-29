@@ -8,9 +8,13 @@ import {
   fetchSummary,
   fetchSipLines,
   fetchAgentGroups,
+  fetchDIDMappings,
+  fetchTempIncomingCallRows,
   subscribeToAgents,
   subscribeToCalls,
   subscribeToIncomingCalls,
+  subscribeToTempIncomingCallRows,
+  type TempIncomingCallRow,
 } from "@/services/dashboardApi";
 import { DASHBOARD_DISMISS_INCOMING_CALLER_EVENT } from "@/services/linkusCallLog";
 import { fetchAgentOnboarding } from "@/services/agentOnboardingApi";
@@ -29,6 +33,7 @@ import type {
   AgentGroup,
   AgentOnboarding,
   IncomingCall,
+  DIDMapping,
   UserSession,
   ConnectionStatus,
 } from "@/services/types";
@@ -204,6 +209,21 @@ export function useDashboardData({
     staleTime: 60_000,
   });
 
+  const { data: didMappings = [] } = useQuery({
+    queryKey: ["didMappings", "tempIncomingCallStatuses"],
+    queryFn: fetchDIDMappings,
+    enabled: !!session,
+    staleTime: 60_000,
+  });
+
+  const { data: tempIncomingRows = [] } = useQuery({
+    queryKey: ["tempIncomingCallStatuses"],
+    queryFn: fetchTempIncomingCallRows,
+    enabled: !!session,
+    staleTime: 5_000,
+    refetchInterval: refreshInterval,
+  });
+
   // --- Incoming Calls Logic (Manual State) ---
 
   const [incomingCalls, setIncomingCalls] = useState<IncomingCall[]>(() => {
@@ -221,24 +241,100 @@ export function useDashboardData({
   const prevIncomingByIdRef = useRef<Map<string, IncomingCall>>(new Map());
   const skipQueueLingerForIdsRef = useRef<Set<string>>(new Set());
 
+  const visibleTempIncomingRows = useMemo(
+    () =>
+      tempIncomingRows.filter(
+        (row) =>
+          row.status !== "ended" ||
+          now - row.updatedAt < QUEUE_CARD_INCOMING_LINGER_MS,
+      ),
+    [tempIncomingRows, now],
+  );
+
   const incomingCallsWithQueueLinger = useMemo(() => {
-    const activeIds = new Set(incomingCalls.map((c) => c.id));
+    const activeById = new Map<string, IncomingCall>();
+    for (const call of incomingCalls) {
+      const tableRow = findTempIncomingRowForCall(visibleTempIncomingRows, call);
+      if (tableRow && tableRow.status !== "ringing") continue;
+      activeById.set(
+        call.id,
+        tableRow ? mergeTempIncomingStatus(call, tableRow) : call,
+      );
+    }
+
+    for (const row of visibleTempIncomingRows) {
+      if (row.status !== "ringing") continue;
+      const existing = [...activeById.values()].find((call) =>
+        tempIncomingRowMatchesCall(row, call),
+      );
+      if (existing) {
+        activeById.set(existing.id, mergeTempIncomingStatus(existing, row));
+        continue;
+      }
+      const call = buildIncomingCallFromTempRow(
+        row,
+        didMappings,
+        queues,
+        tenants,
+        null,
+      );
+      if (call) activeById.set(call.id, call);
+    }
+
+    const activeIds = new Set(activeById.keys());
     const extra: IncomingCall[] = [];
     for (const [id, v] of endedIncomingLinger) {
       if (activeIds.has(id)) continue;
       if (now - v.endedAt >= QUEUE_CARD_INCOMING_LINGER_MS) continue;
+      if (
+        visibleTempIncomingRows.some((row) =>
+          tempIncomingRowMatchesCall(row, v.call),
+        )
+      ) {
+        continue;
+      }
       extra.push(v.call);
     }
-    return [...incomingCalls, ...extra];
-  }, [incomingCalls, endedIncomingLinger, now]);
+
+    for (const row of visibleTempIncomingRows) {
+      if (row.status === "ringing") continue;
+      const existing =
+        incomingCalls.find((call) => tempIncomingRowMatchesCall(row, call)) ??
+        [...endedIncomingLinger.values()]
+          .map((entry) => entry.call)
+          .find((call) => tempIncomingRowMatchesCall(row, call)) ??
+        null;
+      const call = buildIncomingCallFromTempRow(
+        row,
+        didMappings,
+        queues,
+        tenants,
+        existing,
+      );
+      if (call) extra.push(call);
+    }
+
+    return [...activeById.values(), ...extra];
+  }, [
+    incomingCalls,
+    endedIncomingLinger,
+    visibleTempIncomingRows,
+    didMappings,
+    queues,
+    tenants,
+    now,
+  ]);
 
   const queueIncomingLingerEndedAt = useMemo(() => {
     const m = new Map<string, number>();
     for (const [id, v] of endedIncomingLinger) {
       if (now - v.endedAt < QUEUE_CARD_INCOMING_LINGER_MS) m.set(id, v.endedAt);
     }
+    for (const row of visibleTempIncomingRows) {
+      if (row.status !== "ringing") m.set(row.id, row.updatedAt);
+    }
     return m;
-  }, [endedIncomingLinger, now]);
+  }, [endedIncomingLinger, visibleTempIncomingRows, now]);
 
   useEffect(() => {
     queueLingerInitRef.current = false;
@@ -479,7 +575,9 @@ export function useDashboardData({
           return [merged, ...prev.filter((c) => c.id !== call.id)];
         });
       },
-      (callId) => setIncomingCalls((prev) => prev.filter((c) => c.id !== callId)),
+      (callId) => {
+        setIncomingCalls((prev) => prev.filter((c) => c.id !== callId));
+      },
     );
 
     const triggerRefetch = () => {
@@ -487,9 +585,13 @@ export function useDashboardData({
       void queryClient.invalidateQueries({ queryKey: ["calls"] });
       void queryClient.invalidateQueries({ queryKey: ["queues"] });
       void queryClient.invalidateQueries({ queryKey: ["summary"] });
+      void queryClient.invalidateQueries({ queryKey: ["tempIncomingCallStatuses"] });
     };
 
     const unsubAgents = subscribeToAgents(effectiveTenant, triggerRefetch);
+    const unsubTempIncomingStatuses = subscribeToTempIncomingCallRows(() => {
+      void queryClient.invalidateQueries({ queryKey: ["tempIncomingCallStatuses"] });
+    });
     /** Skip `calls` / softphone disposition CDC when neither calls nor queues tab data is loaded. */
     const needsCallsTableCdc = needsCalls || needsQueues;
     const unsubCallLog = needsCallsTableCdc
@@ -499,9 +601,16 @@ export function useDashboardData({
     return () => {
       unsubCalls();
       unsubAgents();
+      unsubTempIncomingStatuses();
       unsubCallLog();
     };
-  }, [session, effectiveTenant, queryClient, needsCalls, needsQueues]);
+  }, [
+    session,
+    effectiveTenant,
+    queryClient,
+    needsCalls,
+    needsQueues,
+  ]);
 
   const invalidateDashboardQueries = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["tenants"] });
@@ -512,6 +621,8 @@ export function useDashboardData({
     void queryClient.invalidateQueries({ queryKey: ["sipLines"] });
     void queryClient.invalidateQueries({ queryKey: ["agentGroups"] });
     void queryClient.invalidateQueries({ queryKey: ["agentOnboarding"] });
+    void queryClient.invalidateQueries({ queryKey: ["didMappings"] });
+    void queryClient.invalidateQueries({ queryKey: ["tempIncomingCallStatuses"] });
   }, [queryClient]);
 
   // Handle manual refresh requests
@@ -582,3 +693,104 @@ export function useDashboardData({
     startInternalChat,
   };
 }
+
+function buildIncomingCallFromTempRow(
+  row: TempIncomingCallRow,
+  didMappings: DIDMapping[],
+  queues: Queue[],
+  tenants: Tenant[],
+  existing: IncomingCall | null,
+): IncomingCall | null {
+  if (!row.callerNumber) return null;
+
+  const mapping = findDidMappingForTempRow(row, didMappings);
+  const queueId = existing?.queueId || mapping?.queueId || "";
+  if (!queueId) return null;
+
+  const queue = queues.find((entry) => entry.id === queueId);
+  const tenantId =
+    existing?.tenantId ||
+    mapping?.tenantId ||
+    queue?.tenantId ||
+    "unknown";
+  const tenant = tenants.find((entry) => entry.id === tenantId);
+
+  return {
+    id: row.id,
+    did: row.did || existing?.did || "",
+    callerNumber: row.callerNumber || existing?.callerNumber || "",
+    callerName: existing?.callerName ?? null,
+    tenantId,
+    tenantName: existing?.tenantName || tenant?.name || "Unknown",
+    tenantBrandColor:
+      existing?.tenantBrandColor || tenant?.brandColor || "#00d4f5",
+    queueId,
+    queueName: existing?.queueName || queue?.name || "Inbound",
+    groupId: existing?.groupId || queueId,
+    groupName: existing?.groupName || queue?.name || "",
+    didLabel: existing?.didLabel || mapping?.label || row.did || "",
+    branchId: existing?.branchId || mapping?.branchId || "",
+    branchName: existing?.branchName || mapping?.branchName || "",
+    mappingWorkshopName:
+      existing?.mappingWorkshopName || mapping?.mappingWorkshopName || "",
+    ownerId: existing?.ownerId || mapping?.ownerId || "",
+    waitingSince: existing?.waitingSince || row.updatedAt,
+    status: row.status,
+  };
+}
+
+function mergeTempIncomingStatus(
+  call: IncomingCall,
+  row: TempIncomingCallRow,
+): IncomingCall {
+  return {
+    ...call,
+    did: row.did || call.did,
+    callerNumber: row.callerNumber || call.callerNumber,
+    status: row.status,
+  };
+}
+
+function findTempIncomingRowForCall(
+  rows: TempIncomingCallRow[],
+  call: IncomingCall,
+): TempIncomingCallRow | undefined {
+  return (
+    rows.find((row) => row.id === call.id) ??
+    rows.find((row) => tempIncomingRowMatchesCall(row, call))
+  );
+}
+
+function tempIncomingRowMatchesCall(
+  row: TempIncomingCallRow,
+  call: IncomingCall,
+): boolean {
+  if (row.id === call.id) return true;
+  const a = normalizePhoneForTempMatch(row.callerNumber);
+  const b = normalizePhoneForTempMatch(call.callerNumber);
+  return Boolean(a && b && (a === b || a.endsWith(b) || b.endsWith(a)));
+}
+
+function findDidMappingForTempRow(
+  row: TempIncomingCallRow,
+  didMappings: DIDMapping[],
+): DIDMapping | undefined {
+  if (!row.did) return undefined;
+  const normalizedRowDid = normalizePhoneForTempMatch(row.did);
+  return didMappings.find((mapping) => {
+    if (mapping.did === row.did) return true;
+    const normalizedMappingDid = normalizePhoneForTempMatch(mapping.did);
+    return Boolean(
+      normalizedRowDid &&
+        normalizedMappingDid &&
+        (normalizedRowDid === normalizedMappingDid ||
+          normalizedRowDid.endsWith(normalizedMappingDid) ||
+          normalizedMappingDid.endsWith(normalizedRowDid)),
+    );
+  });
+}
+
+function normalizePhoneForTempMatch(value: string | null | undefined): string {
+  return (value ?? "").replace(/\D/g, "");
+}
+

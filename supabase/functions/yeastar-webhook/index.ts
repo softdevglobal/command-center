@@ -12,6 +12,7 @@ const supabase = createClient(
 );
 
 const RECORDING_BASE_URL = Deno.env.get('YEASTAR_RECORDING_BASE_URL') ?? '';
+const TEMP_INCOMING_CALL_RETENTION_MS = 10 * 60_000;
 
 Deno.serve(async (req) => {
   // CORS preflight
@@ -502,13 +503,22 @@ async function handleNewCdr(body: Record<string, unknown>) {
     }).eq('id', finalAgentId);
   }
 
+  // Only inbound calls belong in temp_incoming_calls. Outbound CDRs would
+  // otherwise insert a stray "ended" row since they never had a ringing row.
+  if (direction === 'inbound') {
+    await setTempIncomingCallStatus(`incoming-${callid}`, 'ended', {
+      did: inboundDid ?? '',
+      callerNumber: customerNumber,
+    });
+  }
+
   // Remove the call from the live dashboard — CDR is the definitive end-of-call
   // signal, so this is the only place CallHangup should be broadcast.
   // (BYE events on IncomingCall only end one ring leg, not the whole call.)
   await supabase.channel('yeastar-incoming-calls').send({
     type: 'broadcast',
     event: 'CallHangup',
-    payload: { id: `incoming-${callid}`, callerNumber: customerNumber },
+    payload: { id: `incoming-${callid}` },
   });
 
   // console.log(`[yeastar-webhook] NewCdr written + CallHangup broadcast: yeastar-${callid}`);
@@ -660,25 +670,34 @@ async function handleIncomingCall(body: Record<string, unknown>) {
   if (memberStatus === 'BYE') {
     await updateAgentLiveCallState(extension, memberStatus, callfrom);
 
-    if (callid && callfrom && tenantId && tenantId !== 'unknown') {
-      const stillActive = await hasActiveLegForCaller(tenantId, callfrom);
-      if (!stillActive) {
-        await supabase.channel('yeastar-incoming-calls').send({
-          type: 'broadcast',
-          event: 'CallHangup',
-          payload: { id: `incoming-${callid}`, callerNumber: callfrom },
-        });
-        // console.log(`[yeastar-webhook] BYE — no active legs for ${callfrom}, CallHangup broadcast: incoming-${callid}`);
-      }
-    } else if (callid && !callfrom) {
-      // No callfrom on this BYE — best-effort: broadcast anyway. The dashboard
-      // dedupes by id, so a stale broadcast is harmless if the call is alive.
-      await supabase.channel('yeastar-incoming-calls').send({
-        type: 'broadcast',
-        event: 'CallHangup',
-        payload: { id: `incoming-${callid}`, callerNumber: '' },
-      });
+    if (!callid) {
+      return;
     }
+
+    // Decide whether the call as a whole is still alive (an unrelated ring leg
+    // hung up while a different agent is still talking to the caller). When the
+    // tenant or caller isn't known we can't ask `hasActiveLegForCaller`, so we
+    // fall through and mark the row ended — the worst case is a brief flicker
+    // if the call really was still live elsewhere.
+    let stillActive = false;
+    if (callfrom && tenantId && tenantId !== 'unknown') {
+      stillActive = await hasActiveLegForCaller(tenantId, callfrom);
+    }
+
+    if (stillActive) {
+      return;
+    }
+
+    await setTempIncomingCallStatus(`incoming-${callid}`, 'ended', {
+      did,
+      callerNumber: callfrom || '',
+    });
+
+    await supabase.channel('yeastar-incoming-calls').send({
+      type: 'broadcast',
+      event: 'CallHangup',
+      payload: { id: `incoming-${callid}` },
+    });
 
     return;
   }
@@ -688,22 +707,34 @@ async function handleIncomingCall(body: Record<string, unknown>) {
   // we keep the notification card visible so the user knows the call is still live.
   const isAnswered = memberStatus === 'ANSWER' || memberStatus === 'ANSWERED';
   if (isAnswered) {
-    const wasAgent = await updateAgentLiveCallState(extension, memberStatus, callfrom);
-    
-    if (wasAgent) {
+    const answeredAgent = await updateAgentLiveCallState(extension, memberStatus, callfrom);
+
+    if (!callid) {
+      return;
+    }
+
+    await setTempIncomingCallStatus(`incoming-${callid}`, 'answered', {
+      did,
+      callerNumber: callfrom || '',
+    });
+
+    // Broadcast CallAnswered only when picked up by a real agent so the
+    // floating monitor closes; IVR/CFD picks keep the card open.
+    if (answeredAgent) {
       await supabase.channel('yeastar-incoming-calls').send({
         type: 'broadcast',
         event: 'CallAnswered',
-        payload: { id: `incoming-${callid}`, callerNumber: callfrom },
+        payload: { id: `incoming-${callid}` },
       });
-      // console.log(`[yeastar-webhook] IncomingCall ANSWERED by agent — CallAnswered broadcast: ${callfrom} → ${extension}`);
-    } else {
-      // console.log(`[yeastar-webhook] IncomingCall ANSWERED by non-agent (IVR/CFD) — keeping card: ${callfrom} → ${extension}`);
     }
     return;
   }
 
   await updateAgentLiveCallState(extension, memberStatus, callfrom);
+  await setTempIncomingCallStatus(`incoming-${callid}`, 'ringing', {
+    did,
+    callerNumber: callfrom || '',
+  });
 
   await supabase.channel('yeastar-incoming-calls').send({
     type: 'broadcast',
@@ -712,6 +743,120 @@ async function handleIncomingCall(body: Record<string, unknown>) {
   });
 
   // console.log(`[yeastar-webhook] IncomingCall broadcast: ${callfrom} → ${did} (${memberStatus || 'RING'})`);
+}
+
+/**
+ * Single helper that drives the temporary incoming-call table. Only persists
+ * the four fields the dashboard needs: id, DID, caller number, and status.
+ * Inserts on first sight; updates the status on later events.
+ */
+async function setTempIncomingCallStatus(
+  id: string,
+  status: 'ringing' | 'answered' | 'ended',
+  args: { did?: string | null; callerNumber?: string | null } = {},
+): Promise<void> {
+  if (!id) return;
+  await deleteExpiredTemporaryIncomingCalls();
+
+  const nowIso = new Date().toISOString();
+  // Fields to write on update (no id) and to seed an insert (with id).
+  const changes: Record<string, unknown> = {
+    status,
+    updated_at: nowIso,
+  };
+  if (args.did) changes.did = args.did;
+  if (args.callerNumber) changes.caller_number = args.callerNumber;
+
+  const { data: updatedById, error: updateByIdError } = await supabase
+    .from('temp_incoming_calls')
+    .update(changes)
+    .eq('id', id)
+    .select('id');
+
+  if (updateByIdError) {
+    console.warn(`[yeastar-webhook] temp_incoming_calls status update failed: ${updateByIdError.message}`);
+    return;
+  }
+
+  if (updatedById && updatedById.length > 0) return;
+
+  // The exact id wasn't found. For answer/end transitions Yeastar frequently
+  // reports a different callid (leg suffix like `@`, `-`, `_`) and a different
+  // caller-number FORMAT than the original ringing event (raw `callfrom` vs the
+  // extracted/normalized CDR number). Match the original active row tolerantly
+  // so it transitions instead of leaving a stuck "ringing" row + a duplicate.
+  if (status !== 'ringing') {
+    const idBase = tempIncomingIdBase(id);
+    const normalizedCaller = tempIncomingDigits(args.callerNumber);
+
+    const { data: activeRows, error: activeRowsError } = await supabase
+      .from('temp_incoming_calls')
+      .select('id, caller_number')
+      .neq('status', 'ended');
+
+    if (activeRowsError) {
+      console.warn(`[yeastar-webhook] temp_incoming_calls active lookup failed: ${activeRowsError.message}`);
+    } else {
+      const matchIds = (activeRows ?? [])
+        .filter((candidate) => {
+          if (tempIncomingIdBase(String(candidate.id)) === idBase) return true;
+          const candidateDigits = tempIncomingDigits(candidate.caller_number);
+          return Boolean(
+            normalizedCaller &&
+              candidateDigits &&
+              (candidateDigits === normalizedCaller ||
+                candidateDigits.endsWith(normalizedCaller) ||
+                normalizedCaller.endsWith(candidateDigits)),
+          );
+        })
+        .map((candidate) => String(candidate.id));
+
+      if (matchIds.length > 0) {
+        const { error: matchUpdateError } = await supabase
+          .from('temp_incoming_calls')
+          .update(changes)
+          .in('id', matchIds);
+
+        if (matchUpdateError) {
+          console.warn(`[yeastar-webhook] temp_incoming_calls match update failed: ${matchUpdateError.message}`);
+        }
+        return;
+      }
+    }
+  }
+
+  const { error: insertError } = await supabase
+    .from('temp_incoming_calls')
+    .insert({ id, ...changes });
+
+  if (insertError) {
+    console.warn(`[yeastar-webhook] temp_incoming_calls insert failed: ${insertError.message}`);
+  }
+}
+
+/** Strip the `incoming-` prefix and any Yeastar leg suffix (`@`, `-`, `_`). */
+function tempIncomingIdBase(id: string): string {
+  const withoutPrefix = String(id ?? '').replace(/^incoming-/, '');
+  return withoutPrefix.split('@')[0].split('-')[0].split('_')[0].trim();
+}
+
+function tempIncomingDigits(value: unknown): string {
+  return String(value ?? '').replace(/\D/g, '');
+}
+
+async function deleteExpiredTemporaryIncomingCalls(): Promise<void> {
+  // Drop ended rows older than the retention window (`updated_at`-based since
+  // that is the only timestamp we maintain on the simplified table).
+  const cutoff = new Date(Date.now() - TEMP_INCOMING_CALL_RETENTION_MS).toISOString();
+  const { error } = await supabase
+    .from('temp_incoming_calls')
+    .delete()
+    .eq('status', 'ended')
+    .lt('updated_at', cutoff);
+
+  if (error) {
+    console.warn(`[yeastar-webhook] temp_incoming_calls cleanup failed: ${error.message}`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -849,8 +994,8 @@ async function updateAgentLiveCallState(
   extension: string,
   memberStatus: string,
   callerNumber: string,
-): Promise<boolean> {
-  if (!extension) return false;
+): Promise<{ id: string; name: string; extension: string } | null> {
+  if (!extension) return null;
 
   const s = memberStatus.toUpperCase();
   const isRinging = s === 'ALERT' || s === 'RING';
@@ -878,21 +1023,28 @@ async function updateAgentLiveCallState(
       call_start_time: null,
     };
   } else {
-    return false;
+    return null;
   }
 
   const { data, error } = await supabase
     .from('agents')
     .update(update)
     .eq('extension', extension)
-    .select('id');
+    .select('id, name, extension');
 
   if (error) {
     // console.error(`[yeastar-webhook] Failed to sync live caller for ext ${extension}: ${error.message}`);
-    return false;
+    return null;
   }
 
-  return (data?.length ?? 0) > 0;
+  const row = data?.[0];
+  return row
+    ? {
+      id: row.id,
+      name: row.name ?? '',
+      extension: row.extension ?? extension,
+    }
+    : null;
 }
 
 function buildPhoneLookupVariants(phone: string): string[] {
