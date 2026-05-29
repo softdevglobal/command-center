@@ -611,9 +611,14 @@ function extractChatId(json: unknown): string {
 export async function startCallCenterChatWithOwner(
   workshopOwnerUid: string,
   text?: string,
+  options?: { branchId?: string | null; branchName?: string | null },
 ): Promise<StartCallCenterChatResponse> {
   const body: Record<string, unknown> = { workshopOwnerUid };
   if (text != null && text.trim()) body.text = text.trim();
+  const branchId = options?.branchId?.trim();
+  const branchName = options?.branchName?.trim();
+  if (branchId) body.branchId = branchId;
+  if (branchName) body.branchName = branchName;
 
   const res = await authorizedFetchCallCenter('/chats/start-with-owner', {
     method: 'POST',

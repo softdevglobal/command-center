@@ -195,7 +195,7 @@ export function OverviewTab({
       };
 
       // Real incoming present — show as incoming, with any linger rows appended
-      // below so a freshly-ended call still appears for the 40 s linger window.
+      // below so a freshly-ended call still appears for the 10-minute linger window.
       if (activeUnansweredIncoming.length > 0) {
         const head = activeUnansweredIncoming[0];
         const incomingCallers = [
@@ -286,7 +286,7 @@ export function OverviewTab({
 
       // Linger-only fallback: no real incoming and no live/ringing agent — show
       // the recently-ended caller(s) in the recall treatment so the queue card
-      // keeps the row visible for ~40 s after the call ends.
+      // keeps the row visible for up to 10 minutes after the call ends.
       if (lingerUnansweredIncoming.length > 0) {
         const head = lingerUnansweredIncoming[0];
         map.set(queue.id, {

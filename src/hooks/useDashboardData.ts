@@ -76,11 +76,49 @@ export interface DashboardData {
 const POLL_INTERVAL = 8000;
 const POLL_INTERVAL_AGENT_MS = 15000;
 const INCOMING_CALLS_STORAGE_KEY = "cc_incoming_calls_v1";
+const QUEUE_CARD_INCOMING_LINGER_STORAGE_KEY = "cc_queue_card_incoming_linger_v1";
 const DASHBOARD_REFRESH_REQUEST_EVENT = "cc-dashboard-refresh-request";
 /** Keep ended / cleared incoming rows visible on overview queue cards only (not the floating monitor). */
 const QUEUE_CARD_INCOMING_LINGER_MS = 10 * 60_000;
 /** Ignore duplicate dismiss events for the same Linkus leg (reject + deleteSession). */
 const LINKUS_DISMISS_DEDUP_MS = 3500;
+
+type QueueCardIncomingLingerEntry = {
+  call: IncomingCall;
+  endedAt: number;
+};
+
+function restoreQueueCardIncomingLinger(): Map<string, QueueCardIncomingLingerEntry> {
+  try {
+    const saved = sessionStorage.getItem(QUEUE_CARD_INCOMING_LINGER_STORAGE_KEY);
+    if (!saved) return new Map();
+
+    const raw = JSON.parse(saved) as Array<{
+      id?: string;
+      call?: IncomingCall;
+      endedAt?: number;
+    }>;
+    if (!Array.isArray(raw)) return new Map();
+
+    const nowMs = Date.now();
+    const entries = raw.flatMap((entry) => {
+      if (!entry?.id || !entry.call || typeof entry.endedAt !== "number") {
+        return [];
+      }
+      if (nowMs - entry.endedAt >= QUEUE_CARD_INCOMING_LINGER_MS) {
+        return [];
+      }
+      return [[entry.id, { call: entry.call, endedAt: entry.endedAt }] as const];
+    });
+
+    if (entries.length === 0) {
+      sessionStorage.removeItem(QUEUE_CARD_INCOMING_LINGER_STORAGE_KEY);
+    }
+    return new Map(entries);
+  } catch {
+    return new Map();
+  }
+}
 
 /**
  * Tab→query gating lives in `@/lib/dashboardQueryLimits` (shared with hover prefetch).
@@ -238,10 +276,14 @@ export function useDashboardData({
   });
 
   const [endedIncomingLinger, setEndedIncomingLinger] = useState<
-    Map<string, { call: IncomingCall; endedAt: number }>
-  >(() => new Map());
+    Map<string, QueueCardIncomingLingerEntry>
+  >(restoreQueueCardIncomingLinger);
   const queueLingerInitRef = useRef(false);
   const prevIncomingByIdRef = useRef<Map<string, IncomingCall>>(new Map());
+  const queueLingerScopeRef = useRef<{
+    userId: string | null;
+    tenantId: string | null;
+  } | null>(null);
 
   const incomingCallsWithQueueLinger = useMemo(() => {
     const activeIds = new Set(incomingCalls.map((c) => c.id));
@@ -263,9 +305,39 @@ export function useDashboardData({
   }, [endedIncomingLinger, now]);
 
   useEffect(() => {
+    const nextScope = {
+      userId: session?.userId ?? null,
+      tenantId: effectiveTenant ?? null,
+    };
+    const previousScope = queueLingerScopeRef.current;
+    const userChanged =
+      previousScope?.userId != null &&
+      previousScope.userId !== nextScope.userId;
+
+    queueLingerScopeRef.current = nextScope;
     queueLingerInitRef.current = false;
     prevIncomingByIdRef.current = new Map();
-    setEndedIncomingLinger(new Map());
+
+    setEndedIncomingLinger((prev) => {
+      if (userChanged) return new Map();
+
+      let dirty = false;
+      const next = new Map<string, QueueCardIncomingLingerEntry>();
+      const nowMs = Date.now();
+
+      for (const [id, v] of prev) {
+        const expired = nowMs - v.endedAt >= QUEUE_CARD_INCOMING_LINGER_MS;
+        const outsideTenant =
+          Boolean(nextScope.tenantId) && v.call.tenantId !== nextScope.tenantId;
+        if (expired || outsideTenant) {
+          dirty = true;
+          continue;
+        }
+        next.set(id, v);
+      }
+
+      return dirty ? next : prev;
+    });
   }, [session?.userId, effectiveTenant]);
 
   useEffect(() => {
@@ -316,6 +388,27 @@ export function useDashboardData({
       return dirty ? next : prev;
     });
   }, [now]);
+
+  useEffect(() => {
+    try {
+      const entries = [...endedIncomingLinger.entries()].map(([id, v]) => ({
+        id,
+        call: v.call,
+        endedAt: v.endedAt,
+      }));
+
+      if (entries.length > 0) {
+        sessionStorage.setItem(
+          QUEUE_CARD_INCOMING_LINGER_STORAGE_KEY,
+          JSON.stringify(entries),
+        );
+      } else {
+        sessionStorage.removeItem(QUEUE_CARD_INCOMING_LINGER_STORAGE_KEY);
+      }
+    } catch {
+      /* ignore quota errors */
+    }
+  }, [endedIncomingLinger]);
 
   useEffect(() => {
     try {

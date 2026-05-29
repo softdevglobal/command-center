@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type UIEvent,
 } from 'react';
 import {
   ArrowLeft,
@@ -188,6 +189,8 @@ export function ChatTab({
   const messagesBottomRef = useRef<HTMLDivElement>(null);
   const workshopSelectTriggerRef = useRef<HTMLButtonElement>(null);
   const lastChatViewAuditRef = useRef<{ chatId: string; at: number } | null>(null);
+  const shouldAutoScrollThreadRef = useRef(true);
+  const lastAutoScrolledConversationRef = useRef<string | null>(null);
   const allRef = useRef<Conversation[]>([]);
   /** Until the new thread appears in `fetchConversations`, match workshop header from picker. */
   const pendingWorkshopOwnerUidRef = useRef<string | null>(null);
@@ -507,9 +510,41 @@ export function ChatTab({
     [messages],
   );
 
+  const messageListSignature = useMemo(() => {
+    const last = sortedMessages[sortedMessages.length - 1];
+    return [
+      selectedId ?? '',
+      sortedMessages.length,
+      last?.messageId?.trim() ?? '',
+      last?.createdAt ?? '',
+      last?.text ?? '',
+    ].join('|');
+  }, [selectedId, sortedMessages]);
+
+  const handleThreadScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    shouldAutoScrollThreadRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= 96;
+  }, []);
+
   useEffect(() => {
+    shouldAutoScrollThreadRef.current = true;
+    lastAutoScrolledConversationRef.current = null;
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+
+    const isNewConversation = lastAutoScrolledConversationRef.current !== selectedId;
+    if (isNewConversation) {
+      shouldAutoScrollThreadRef.current = true;
+      lastAutoScrolledConversationRef.current = selectedId;
+    }
+
+    if (!shouldAutoScrollThreadRef.current) return;
+
     messagesBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [sortedMessages, selectedId, threadLoading]);
+  }, [messageListSignature, selectedId]);
 
   const isAgentMessage = useCallback(
     (m: ChatMessage) => {
@@ -729,6 +764,7 @@ export function ChatTab({
       const created = isCallCenterThread
         ? await postCallCenterChatMessage(selectedId, text)
         : await postConversationMessage(selectedId, text);
+      shouldAutoScrollThreadRef.current = true;
       setDraft('');
 
       if (created) {
@@ -1180,6 +1216,7 @@ export function ChatTab({
 
                   <div
                     ref={threadScrollRef}
+                    onScroll={handleThreadScroll}
                     className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain rounded-lg border border-slate-100 bg-slate-50/50 p-3"
                   >
                     {threadLoading ? (

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+﻿import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { CalendarCheck } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -8,6 +8,7 @@ import {
   Loader2,
   Mail,
   MapPin,
+  MessageSquare,
   Send,
   StickyNote,
   UserRound,
@@ -27,6 +28,12 @@ import { fetchAgentByCallerNumber } from "@/services/dashboardApi";
 import { fetchFirebaseCallerContext } from "@/services/customersApi";
 import { getDIDMappingByDid } from "@/services/didMappingsApi";
 import {
+  fetchCallCenterChatMessages,
+  postCallCenterChatMessage,
+  startCallCenterChatWithOwner,
+  type ChatMessage,
+} from "@/services/chatApi";
+import {
   getServicesByBranch,
   type WorkshopService,
 } from "@/services/servicesApi";
@@ -35,6 +42,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/dashboard/EmptyState";
+import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -228,10 +236,19 @@ export function CallDetailsSheet({
   const [blueNoteSending, setBlueNoteSending] = useState(false);
   const [blueNoteMessage, setBlueNoteMessage] = useState<string | null>(null);
   const [blueNoteError, setBlueNoteError] = useState<string | null>(null);
+  const [workshopChatOpen, setWorkshopChatOpen] = useState(false);
+  const [workshopChatId, setWorkshopChatId] = useState<string | null>(null);
+  const [workshopChatMessages, setWorkshopChatMessages] = useState<ChatMessage[]>([]);
+  const [workshopChatLoading, setWorkshopChatLoading] = useState(false);
+  const [workshopChatError, setWorkshopChatError] = useState<string | null>(null);
+  const [workshopChatDraft, setWorkshopChatDraft] = useState("");
+  const [workshopChatSending, setWorkshopChatSending] = useState(false);
+  const workshopChatScrollRef = useRef<HTMLDivElement>(null);
   const commandButtons = useMemo(
     () => [
       { label: "Book Now", icon: CalendarPlus2 },
       { label: "Booking Details", icon: CalendarCheck },
+      { label: "Workshop Chat", icon: MessageSquare },
     ],
     [],
   );
@@ -429,6 +446,52 @@ export function CallDetailsSheet({
     setBlueNoteSending(false);
   }, [detail?.id, open]);
 
+  useEffect(() => {
+    setWorkshopChatOpen(false);
+    setWorkshopChatId(null);
+    setWorkshopChatMessages([]);
+    setWorkshopChatError(null);
+    setWorkshopChatDraft("");
+    setWorkshopChatLoading(false);
+    setWorkshopChatSending(false);
+  }, [detail?.id]);
+
+  useEffect(() => {
+    if (!open) {
+      setWorkshopChatOpen(false);
+      setWorkshopChatId(null);
+      setWorkshopChatMessages([]);
+      setWorkshopChatError(null);
+      setWorkshopChatDraft("");
+      setWorkshopChatLoading(false);
+      setWorkshopChatSending(false);
+    }
+  }, [open]);
+
+  useEffect(() => {
+    if (!workshopChatOpen) return;
+    const container = workshopChatScrollRef.current;
+    if (!container) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [workshopChatMessages, workshopChatLoading, workshopChatOpen]);
+
+  useEffect(() => {
+    if (!workshopChatOpen || !workshopChatId) return;
+    const id = workshopChatId;
+    const interval = setInterval(() => {
+      fetchCallCenterChatMessages(id)
+        .then(setWorkshopChatMessages)
+        .catch(() => {
+          /* keep existing messages while polling */
+        });
+    }, 5_000);
+    return () => clearInterval(interval);
+  }, [workshopChatId, workshopChatOpen]);
+
 
   const resolvedCustomerName =
     callerContext?.customer.name ||
@@ -460,12 +523,86 @@ export function CallDetailsSheet({
         : contextLoading
           ? "Searching..."
           : "Unknown Caller";
+  const sortedWorkshopChatMessages = useMemo(
+    () =>
+      [...workshopChatMessages].sort((a, b) => {
+        const ta = parseChatTime(a.createdAt);
+        const tb = parseChatTime(b.createdAt);
+        return ta !== tb ? ta - tb : (a.messageId || "").localeCompare(b.messageId || "");
+      }),
+    [workshopChatMessages],
+  );
   if (!effectiveDetail) return null;
   const activeDetail = effectiveDetail;
   const isBlueCall = activeDetail.queueKind === "blue";
   const businessName =
     (activeDetail.mappingWorkshopName || activeDetail.workshopName || "Unknown business") +
     (activeDetail.branchName ? ` - ${activeDetail.branchName}` : "");
+
+  async function handleOpenWorkshopChat() {
+    const ownerUid = activeDetail.ownerId.trim();
+    if (!ownerUid || workshopChatLoading) return;
+
+    setWorkshopChatOpen(true);
+    setWorkshopChatError(null);
+
+    if (workshopChatId) {
+      setWorkshopChatLoading(true);
+      try {
+        const rows = await fetchCallCenterChatMessages(workshopChatId);
+        setWorkshopChatMessages(rows);
+      } catch (err) {
+        setWorkshopChatError(err instanceof Error ? err.message : "Failed to load workshop chat.");
+      } finally {
+        setWorkshopChatLoading(false);
+      }
+      return;
+    }
+
+    setWorkshopChatLoading(true);
+    try {
+      const started = await startCallCenterChatWithOwner(ownerUid, undefined, {
+        branchId: activeDetail.branchId,
+        branchName: activeDetail.branchName,
+      });
+      const chatId = started.chatId || started.conversationId || "";
+      if (!chatId) throw new Error("Chat API did not return a chat id.");
+      setWorkshopChatId(chatId);
+      const rows = await fetchCallCenterChatMessages(chatId);
+      setWorkshopChatMessages(rows);
+    } catch (err) {
+      setWorkshopChatError(err instanceof Error ? err.message : "Failed to open workshop chat.");
+    } finally {
+      setWorkshopChatLoading(false);
+    }
+  }
+
+  async function handleSendWorkshopChat(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const text = workshopChatDraft.trim();
+    if (!text || !workshopChatId || workshopChatSending) return;
+
+    setWorkshopChatSending(true);
+    setWorkshopChatError(null);
+    try {
+      const created = await postCallCenterChatMessage(workshopChatId, text);
+      setWorkshopChatDraft("");
+      if (created) {
+        setWorkshopChatMessages((prev) => {
+          const id = created.messageId?.trim();
+          if (id && prev.some((m) => m.messageId === id)) return prev;
+          return [...prev, created];
+        });
+      } else {
+        const rows = await fetchCallCenterChatMessages(workshopChatId);
+        setWorkshopChatMessages(rows);
+      }
+    } catch (err) {
+      setWorkshopChatError(err instanceof Error ? err.message : "Failed to send workshop chat message.");
+    } finally {
+      setWorkshopChatSending(false);
+    }
+  }
 
   async function handleBlueNoteSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -755,11 +892,21 @@ export function CallDetailsSheet({
                             }
                             className="justify-start"
                             disabled={
-                              (command.label === "Book Now" ||
-                                command.label === "Booking Details") &&
-                              (mappingLoading ||
-                                !activeDetail.ownerId ||
-                                !activeDetail.branchId)
+                              command.label === "Workshop Chat"
+                                ? mappingLoading ||
+                                  workshopChatLoading ||
+                                  !activeDetail.ownerId
+                                : (command.label === "Book Now" ||
+                                    command.label === "Booking Details") &&
+                                  (mappingLoading ||
+                                    !activeDetail.ownerId ||
+                                    !activeDetail.branchId)
+                            }
+                            title={
+                              command.label === "Workshop Chat" &&
+                              !activeDetail.ownerId
+                                ? "No DID workshop owner mapping found for this call"
+                                : undefined
                             }
                             onClick={() => {
                               if (command.label === "Book Now") {
@@ -793,6 +940,10 @@ export function CallDetailsSheet({
                                 });
                                 return;
                               }
+                              if (command.label === "Workshop Chat") {
+                                void handleOpenWorkshopChat();
+                                return;
+                              }
                             }}
                           >
                             <Icon className="h-4 w-4" />
@@ -802,6 +953,129 @@ export function CallDetailsSheet({
                       })}
                     </CardContent>
                   </Card>
+
+                  {workshopChatOpen && (
+                    <Card className="border-sky-200 bg-white shadow-sm ring-1 ring-sky-100">
+                      <CardHeader className="pb-3">
+                        <CardTitle className="flex items-center justify-between gap-3 text-base">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <MessageSquare className="h-4 w-4 text-sky-600" />
+                            <span className="truncate">
+                              Workshop Chat
+                              {activeDetail.branchName ? ` - ${activeDetail.branchName}` : ""}
+                            </span>
+                          </span>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-8 shrink-0"
+                            onClick={() => void handleOpenWorkshopChat()}
+                            disabled={workshopChatLoading}
+                          >
+                            {workshopChatLoading ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              "Refresh"
+                            )}
+                          </Button>
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-3 pt-0">
+                        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                          Chat opened from DID {activeDetail.did || activeDetail.didLabel || "-"} for{" "}
+                          {activeDetail.mappingWorkshopName || activeDetail.workshopName || "workshop"}
+                          {activeDetail.branchName ? ` / ${activeDetail.branchName}` : ""}.
+                        </div>
+
+                        {workshopChatError && (
+                          <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                            {workshopChatError}
+                          </div>
+                        )}
+
+                        <div
+                          ref={workshopChatScrollRef}
+                          className="flex max-h-80 min-h-48 flex-col overflow-y-auto rounded-xl border border-slate-200 bg-slate-50/70 p-3"
+                        >
+                          {workshopChatLoading && sortedWorkshopChatMessages.length === 0 ? (
+                            <div className="flex flex-1 items-center justify-center gap-2 text-sm text-slate-500">
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                              Opening workshop chat...
+                            </div>
+                          ) : sortedWorkshopChatMessages.length === 0 ? (
+                            <div className="flex flex-1 items-center justify-center text-center text-sm text-slate-500">
+                              No messages yet. Start the conversation below.
+                            </div>
+                          ) : (
+                            <ul className="space-y-3">
+                              {sortedWorkshopChatMessages.map((message, index) => {
+                                const agentMessage = isWorkshopChatAgentMessage(message);
+                                return (
+                                  <li
+                                    key={
+                                      message.messageId?.trim() ||
+                                      `workshop-chat-${index}-${message.createdAt}`
+                                    }
+                                    className={`flex ${agentMessage ? "justify-end" : "justify-start"}`}
+                                  >
+                                    <div
+                                      className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm shadow-sm ${
+                                        agentMessage
+                                          ? "rounded-br-md bg-sky-600 text-white"
+                                          : "rounded-bl-md border border-slate-200 bg-white text-slate-800"
+                                      }`}
+                                    >
+                                      <p className="whitespace-pre-wrap break-words">
+                                        {message.text}
+                                      </p>
+                                      <div
+                                        className={`mt-1 text-[10px] ${
+                                          agentMessage ? "text-sky-100" : "text-slate-400"
+                                        }`}
+                                      >
+                                        {formatChatTime(message.createdAt) || "Just now"}
+                                      </div>
+                                    </div>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
+                        </div>
+
+                        <form
+                          onSubmit={(event) => void handleSendWorkshopChat(event)}
+                          className="flex gap-2"
+                        >
+                          <Input
+                            value={workshopChatDraft}
+                            onChange={(event) => setWorkshopChatDraft(event.target.value)}
+                            placeholder="Type a message to the workshop..."
+                            disabled={!workshopChatId || workshopChatLoading || workshopChatSending}
+                            autoComplete="off"
+                          />
+                          <Button
+                            type="submit"
+                            className="shrink-0 gap-1.5 bg-sky-600 hover:bg-sky-700"
+                            disabled={
+                              !workshopChatId ||
+                              workshopChatLoading ||
+                              workshopChatSending ||
+                              !workshopChatDraft.trim()
+                            }
+                          >
+                            {workshopChatSending ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Send className="h-4 w-4" />
+                            )}
+                            Send
+                          </Button>
+                        </form>
+                      </CardContent>
+                    </Card>
+                  )}
 
                   <Tabs defaultValue="vehicles" className="space-y-4">
                     <TabsList className="grid h-auto grid-cols-2 rounded-xl bg-slate-200/70 p-1">
@@ -918,6 +1192,31 @@ function formatMatchedAgentRole(agent: Agent): string {
 
 function normalizeCustomerName(name?: string | null): string {
   return name && name.trim() ? name.trim() : "Unknown caller";
+}
+
+function parseChatTime(value: string): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  if (!Number.isNaN(parsed)) return parsed;
+  if (/^\d+$/.test(value)) {
+    const n = Number(value);
+    return value.length <= 10 ? n * 1000 : n;
+  }
+  return 0;
+}
+
+function formatChatTime(value: string): string {
+  const time = parseChatTime(value);
+  if (!time) return "";
+  return new Date(time).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function isWorkshopChatAgentMessage(message: ChatMessage): boolean {
+  const role = message.senderRole?.trim().toLowerCase();
+  return !role || role === "agent" || role === "call-center" || role === "call_center";
 }
 
 
