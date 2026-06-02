@@ -22,6 +22,7 @@ export function derivePermissions(session: UserSession): Permissions {
       isSuperAdmin || isClientAdmin || isSupervisor || isAgent,
     canViewAgentsTab: isSuperAdmin || isClientAdmin || isSupervisor,
     canViewChatTab: isSuperAdmin || isClientAdmin || isSupervisor || isAgent,
+    canViewSmsTab: isSuperAdmin || isSupervisor || isAgent,
     canViewInternalChat: isSuperAdmin || isAgent,
     canViewOverviewTab: true,
     canViewSipTab: isSuperAdmin,

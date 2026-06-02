@@ -9,5 +9,8 @@ verify_jwt = false
 [functions.yeastar-webhook]
 verify_jwt = false
 
+[functions.textbee-webhook]
+verify_jwt = false
+
 [functions.get-sdk-sign]
 verify_jwt = false

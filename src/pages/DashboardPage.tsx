@@ -49,6 +49,7 @@ const AuditLogsTab = lazy(() =>
   import('@/tabs/AuditLogsTab').then((m) => ({ default: m.AuditLogsTab })),
 );
 const ChatTab = lazy(() => import('@/tabs/ChatTab').then((m) => ({ default: m.ChatTab })));
+const SmsTab = lazy(() => import('@/tabs/SmsTab').then((m) => ({ default: m.SmsTab })));
 const DIDMappingsTab = lazy(() =>
   import('@/tabs/DIDMappingsTab').then((m) => ({ default: m.DIDMappingsTab })),
 );
@@ -90,6 +91,7 @@ const AgentCompletedTab = lazy(() =>
 
 import { fetchClients, createClient, advanceClientStage } from '@/services/dashboardApi';
 import { fetchChats } from '@/services/chatApi';
+import { fetchSmsUnreadCount, subscribeToSmsUpdates } from '@/services/smsApi';
 import {
   fetchAllLeaveRequests,
   subscribeToAllLeaveRequestChanges,
@@ -174,6 +176,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
       if (key === 'bookings') return permissions.canViewBookingsTab;
       if (key === 'agents' || key === 'agent-performance') return permissions.canViewAgentsTab;
       if (key === 'chat') return permissions.canViewChatTab;
+      if (key === 'sms') return permissions.canViewSmsTab;
       if (key === 'agent-onboarding') return permissions.canViewAgentOnboardingTab;
       if (key === 'sip') return permissions.canViewSipTab;
       if (key === 'clients') return permissions.canViewClientsTab;
@@ -256,6 +259,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
   );
 
   const [chatNavUnreadCount, setChatNavUnreadCount] = useState(0);
+  const [smsNavUnreadCount, setSmsNavUnreadCount] = useState(0);
   const [internalChatUnreadCount, setInternalChatUnreadCount] = useState(0);
   const [pendingLeaveCount, setPendingLeaveCount] = useState(0);
 
@@ -291,6 +295,31 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
     effectiveChatTenantId,
     chatWorkshopOwnerUid,
   ]);
+
+  useEffect(() => {
+    if (!permissions.canViewSmsTab) return;
+
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const count = await fetchSmsUnreadCount();
+        if (!cancelled) setSmsNavUnreadCount(count);
+      } catch {
+        /* ignore */
+      }
+    };
+
+    void run();
+    const interval = setInterval(run, d.selectedTab === 'sms' ? 30_000 : 120_000);
+    const unsubscribe = subscribeToSmsUpdates(() => {
+      void run();
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      unsubscribe();
+    };
+  }, [permissions.canViewSmsTab, d.selectedTab]);
 
   // Handle Internal Chat unread count (keep polling + listener while Chat tab is open so
   // sidebar badge clears after reading; InternalChatTab dispatches `internal-chat-read`.)
@@ -433,6 +462,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
         currentRole={session.role}
         onSignOut={onSignOut}
         chatNavUnreadCount={chatNavUnreadCount + internalChatUnreadCount}
+        smsNavUnreadCount={smsNavUnreadCount}
         pendingLeaveCount={pendingLeaveCount}
       />
 
@@ -454,7 +484,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
         {/* Tab content: chat fills height and scrolls internally; other tabs scroll the main area */}
         <main
           className={
-            d.selectedTab === 'chat' || d.selectedTab === 'internal-chat'
+            d.selectedTab === 'chat' || d.selectedTab === 'internal-chat' || d.selectedTab === 'sms'
               ? 'flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-6 sm:px-6 lg:px-8'
               : 'min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8'
           }
@@ -547,6 +577,15 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
                       setChatNavUnreadCount(unreadCount)
                     }
                     internalUnreadCount={internalChatUnreadCount}
+                  />
+                </div>
+              )}
+              {d.selectedTab === 'sms' && (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <SmsTab
+                    session={session}
+                    currentAgentDbId={currentAgentDbId}
+                    onInboxStatsChange={({ unreadCount }) => setSmsNavUnreadCount(unreadCount)}
                   />
                 </div>
               )}

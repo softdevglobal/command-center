@@ -15,6 +15,7 @@ export function usePermissions(session: UserSession | null): Permissions {
         canViewBookingsTab: false,
         canViewAgentsTab: false,
         canViewChatTab: false,
+        canViewSmsTab: false,
         canViewOverviewTab: false,
         canViewSipTab: false,
         canViewClientsTab: false,

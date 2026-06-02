@@ -50,6 +50,7 @@ const EMPTY_PERMISSIONS: Permissions = {
   canViewBookingsTab: false,
   canViewAgentsTab: false,
   canViewChatTab: false,
+  canViewSmsTab: false,
   canViewInternalChat: false,
   canViewOverviewTab: false,
   canViewSipTab: false,

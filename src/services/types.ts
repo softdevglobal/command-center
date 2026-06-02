@@ -449,6 +449,8 @@ export interface Permissions {
   canViewAgentsTab: boolean;
   /** Workshop / agent messaging (Chat tab). */
   canViewChatTab: boolean;
+  /** TextBee-backed customer SMS workspace. */
+  canViewSmsTab: boolean;
   canViewInternalChat: boolean;
   canViewOverviewTab: boolean;
   canViewSipTab: boolean;

@@ -18,6 +18,7 @@ import {
   LogOut,
   MapPin,
   MessageSquare,
+  MessageSquareText,
   Phone,
   PhoneForwarded,
   Radio,
@@ -40,6 +41,8 @@ interface DashboardSidebarProps {
   onSignOut: () => Promise<void>;
   /** Unread BMS chat threads (agent inbox) — shows a green indicator on the Chat nav item. */
   chatNavUnreadCount?: number;
+  /** Unread SMS threads — shows an indicator on the SMS nav item. */
+  smsNavUnreadCount?: number;
   /** Pending leave requests count for super admins — shows an indicator on the Leave requests nav item. */
   pendingLeaveCount?: number;
 }
@@ -83,6 +86,7 @@ const NAV_ITEMS: SidebarEntry[] = [
   },
   { kind: 'item', key: 'agent-onboarding', label: 'Agent Onboarding', icon: UserPlus, perm: 'canViewAgentOnboardingTab' },
   { kind: 'item', key: 'chat', label: 'Chat', icon: MessageSquare, perm: 'canViewChatTab' },
+  { kind: 'item', key: 'sms', label: 'SMS', icon: MessageSquareText, perm: 'canViewSmsTab' },
   { kind: 'item', key: 'calls', label: 'Calls', icon: Phone, perm: 'canViewCallsTab' },
   { kind: 'item', key: 'sip', label: 'SIP Lines', icon: Radio, perm: 'canViewSipTab' },
   { kind: 'item', key: 'clients', label: 'Clients', icon: BookOpen, perm: 'canViewClientsTab' },
@@ -122,6 +126,7 @@ export default function DashboardSidebar({
   currentRole,
   onSignOut,
   chatNavUnreadCount = 0,
+  smsNavUnreadCount = 0,
   pendingLeaveCount = 0,
 }: DashboardSidebarProps) {
   const [open, setOpen] = useState(true);
@@ -170,7 +175,9 @@ export default function DashboardSidebar({
               if (entry.kind === 'item') {
                 const { key, label, icon: Icon } = entry;
                 const active = selectedTab === key;
-                const chatUnread = key === 'chat' && chatNavUnreadCount > 0;
+                const unreadCount =
+                  key === 'chat' ? chatNavUnreadCount : key === 'sms' ? smsNavUnreadCount : 0;
+                const showUnread = unreadCount > 0;
                 return (
                   <button
                     key={key}
@@ -185,21 +192,21 @@ export default function DashboardSidebar({
                   >
                     <span className="relative shrink-0">
                       <Icon className="h-4 w-4" />
-                      {chatUnread && (
+                      {showUnread && (
                         <span
                           className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.95)] ring-2 ring-neutral-900"
-                          title={`${chatNavUnreadCount} unread`}
+                          title={`${unreadCount} unread`}
                           aria-hidden
                         />
                       )}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-                    {chatUnread && (
+                    {showUnread && (
                       <span
                         className="shrink-0 rounded-full bg-emerald-500/90 px-1.5 py-0.5 text-[10px] font-bold leading-none text-neutral-950"
-                        aria-label={`${chatNavUnreadCount} unread chats`}
+                        aria-label={`${unreadCount} unread ${key}`}
                       >
-                        {chatNavUnreadCount > 99 ? '99+' : chatNavUnreadCount}
+                        {unreadCount > 99 ? '99+' : unreadCount}
                       </span>
                     )}
                   </button>
