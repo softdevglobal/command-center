@@ -961,7 +961,7 @@ function normalizeCallsApiRow(raw: unknown): CallsApiRow {
     direction: pickNullableRecordString(row, ["direction"]),
     caller_number: pickRecordString(row, ["caller_number", "callerNumber", "from"]) ?? "",
     caller_name: pickNullableRecordString(row, ["caller_name", "callerName", "customerName"]),
-    dialed_number: pickNullableRecordString(row, ["dialed_number", "dialedNumber", "to", "did"]),
+    dialed_number: pickNullableRecordString(row, ["dialed_number", "dialedNumber", "did"]),
     start_time:
       pickRecordString(row, ["start_time", "startTime", "startedAt", "created_at", "createdAt"]) ??
       new Date(0).toISOString(),
@@ -1030,6 +1030,16 @@ async function fetchCallsApiRows(
 }
 
 /** PBX row direction, or infer outbound when `direction` column is absent / default but CDR shape matches outbound. */
+/** Tenant inbound DID — only meaningful for inbound calls. */
+function dialedNumberForDirection(
+  direction: "inbound" | "outbound",
+  dialed: string | null | undefined,
+): string | null {
+  if (direction === "outbound") return null;
+  const trimmed = String(dialed ?? "").trim();
+  return trimmed || null;
+}
+
 function resolveCallDirectionFromRow(c: {
   direction?: string | null;
   caller_number: string;
@@ -1124,7 +1134,7 @@ export async function fetchCalls(
     if (disp) score += 1000;                         // softphone disposition found
     if (row.result === "answered") score += 100;
     if (row.recording_url?.trim()) score += 80;      // answered agent leg (Linkus desktop has no browser disposition)
-    if (row.dialed_number) score += 50;
+    if (resolveCallDirectionFromRow(row) === "inbound" && row.dialed_number) score += 50;
     if ((row.duration_seconds ?? 0) > 0) score += 10;
     score += Math.min(row.duration_seconds ?? 0, 9); // tie-break by duration (cap at 9)
     return score;
@@ -1261,15 +1271,17 @@ export async function fetchCalls(
     const apiTenantName = c.tenant_name?.trim();
     const dbAgentName = effectiveAgentId ? agentMap.get(effectiveAgentId) : null;
 
+    const direction = resolveCallDirectionFromRow(rowForDirection);
+
     return {
       id: c.id,
       tenantId: c.tenant_id,
       queueId: c.queue_id,
       agentId: effectiveAgentId,
-      direction: resolveCallDirectionFromRow(rowForDirection),
+      direction,
       callerNumber: c.caller_number,
       callerName: c.caller_name,
-      dialedNumber: c.dialed_number ?? null,
+      dialedNumber: dialedNumberForDirection(direction, c.dialed_number),
       startTime: c.start_time,
       answerTime: c.answer_time,
       endTime: c.end_time,

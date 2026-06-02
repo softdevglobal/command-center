@@ -122,7 +122,10 @@ function useCallerNames(calls: Call[], tenants: Tenant[]) {
       // 1. DID mapping ownerId (from dialedNumber)
       // 2. tenant.bmsOwnerUid
       // 3. tenantId itself (fallback — many setups use tenantId as the Firebase UID)
-      const didOwner = call.dialedNumber ? didOwnerMap.get(call.dialedNumber) : undefined;
+      const didOwner =
+        call.direction === 'inbound' && call.dialedNumber
+          ? didOwnerMap.get(call.dialedNumber)
+          : undefined;
       const tenantOwner = ownerByTenant.get(call.tenantId);
       const ownerUid = didOwner || tenantOwner || call.tenantId;
 
@@ -274,9 +277,10 @@ export function CallsTab({
       const s = searchTerm.toLowerCase();
       list = list.filter((c) => {
         const resolvedName = nameMap.get(c.callerNumber);
-        const mappedTenantLabel = c.dialedNumber
-          ? didTenantLabelMap.get(c.dialedNumber)
-          : undefined;
+        const mappedTenantLabel =
+          c.direction === 'inbound' && c.dialedNumber
+            ? didTenantLabelMap.get(c.dialedNumber)
+            : undefined;
         const dirLabel = c.direction === 'outbound' ? 'outbound' : 'inbound';
         return (
           c.callerNumber.includes(s) ||
@@ -348,10 +352,13 @@ export function CallsTab({
     const tenant = tenants.find((t) => t.id === c.tenantId);
     const brandColor = tenant?.brandColor || 'var(--cc-color-cyan)';
     const resolvedName = nameMap.get(c.callerNumber) || c.callerName;
-    const mappedTenantLabel = c.dialedNumber
-      ? didTenantLabelMap.get(c.dialedNumber)
-      : undefined;
-    const tenantDisplayName = mappedTenantLabel || c.tenantName;
+    const hasDid = Boolean(c.dialedNumber?.trim());
+    const mappedTenantLabel =
+      c.direction === 'inbound' && hasDid
+        ? didTenantLabelMap.get(c.dialedNumber)
+        : undefined;
+    const tenantDisplayName =
+      hasDid ? (c.direction === 'outbound' ? c.tenantName : mappedTenantLabel || c.tenantName) : '';
 
     return (
       <TableRow
@@ -394,21 +401,25 @@ export function CallsTab({
           {formatPhone(c.callerNumber)}
         </TableCell>
         <TableCell className="font-mono text-xs tabular-nums">
-          {c.dialedNumber ? formatPhone(c.dialedNumber) : '—'}
+          {c.direction === 'inbound' && c.dialedNumber ? formatPhone(c.dialedNumber) : '—'}
         </TableCell>
         {permissions.canViewTenantNames && (
           <TableCell>
-            <span
-              className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-semibold"
-              style={{
-                color: brandColor,
-                borderColor: `${brandColor}40`,
-                background: `${brandColor}12`,
-              }}
-            >
-              <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: brandColor }} />
-              {tenantDisplayName}
-            </span>
+            {tenantDisplayName ? (
+              <span
+                className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-semibold"
+                style={{
+                  color: brandColor,
+                  borderColor: `${brandColor}40`,
+                  background: `${brandColor}12`,
+                }}
+              >
+                <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: brandColor }} />
+                {tenantDisplayName}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">—</span>
+            )}
           </TableCell>
         )}
         <TableCell className="max-w-[200px]">

@@ -218,7 +218,7 @@ export function buildCallFromLinkusSessionEnd(
     direction: p.direction,
     callerNumber,
     callerName: p.name?.trim() ? p.name : null,
-    dialedNumber: p.direction === 'outbound' ? (digits || p.number.trim()) : null,
+    dialedNumber: null,
     startTime: new Date(p.startTimeMs).toISOString(),
     answerTime: answered ? new Date(p.startTimeMs).toISOString() : null,
     endTime: new Date(p.endTimeMs).toISOString(),
@@ -331,7 +331,10 @@ function mergeLinkusIntoServer(s: Call, l: Call): Call {
     ...s,
     agentId: linkusAgentKnown ? l.agentId : (s.agentId ?? l.agentId),
     agentName: linkusAgentKnown ? l.agentName : (s.agentName && s.agentName !== '—' ? s.agentName : l.agentName),
-    dialedNumber: s.dialedNumber ?? l.dialedNumber,
+    dialedNumber:
+      s.direction === 'outbound' || l.direction === 'outbound'
+        ? null
+        : (s.dialedNumber ?? l.dialedNumber),
     callerName: s.callerName ?? l.callerName,
     recordingUrl: s.recordingUrl ?? l.recordingUrl,
   };

@@ -446,7 +446,10 @@ async function handleNewCdr(body: Record<string, unknown>) {
       ? existingCallRes.data.queue_id
       : null;
 
-  const tenantId = mapping?.tenant_id ?? tenantIdFromAgent ?? trunkTenantId ?? existingTenantId ?? 'unknown';
+  const tenantId =
+    direction === 'outbound'
+      ? tenantIdFromAgent ?? existingTenantId ?? trunkTenantId ?? mapping?.tenant_id ?? 'unknown'
+      : mapping?.tenant_id ?? tenantIdFromAgent ?? trunkTenantId ?? existingTenantId ?? 'unknown';
   const queueId = mapping?.queue_id ?? queueIdFromAgent ?? existingQueueId ?? 'unknown';
   const callerName = await lookupCustomerName(tenantId, customerNumber);
 
@@ -457,10 +460,8 @@ async function handleNewCdr(body: Record<string, unknown>) {
     ? new Date(startTime.getTime() + (callduraction - talkduraction) * 1000)
     : null;
 
-  const dialedNumber =
-    direction === 'inbound'
-      ? inboundDid
-      : customerNumber;
+  // Inbound DID only — outbound calls must not persist the customer number as dialed_number.
+  const dialedNumber = direction === 'inbound' ? inboundDid : null;
 
   const preLinkedAgentId = existingCallRes.data?.agent_id && String(existingCallRes.data.agent_id).trim()
     ? String(existingCallRes.data.agent_id)
