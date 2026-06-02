@@ -988,6 +988,36 @@ export type Database = {
         }
         Relationships: []
       }
+      sms_contacts: {
+        Row: {
+          id: string
+          contact_type: string
+          display_name: string
+          phone: string
+          owner_uid: string | null
+          created_by: string | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          contact_type: string
+          display_name: string
+          phone: string
+          owner_uid?: string | null
+          created_by?: string | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          contact_type?: string
+          display_name?: string
+          phone?: string
+          owner_uid?: string | null
+          created_by?: string | null
+          created_at?: string
+        }
+        Relationships: []
+      }
       user_roles: {
         Row: {
           id: string

@@ -10,7 +10,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
   "Access-Control-Max-Age": "86400",
@@ -19,7 +19,14 @@ const corsHeaders = {
 const SMS_CHANNEL = "sms-center";
 const ALLOWED_ROLES = new Set(["super-admin", "supervisor", "agent"]);
 
-type SmsAction = "list" | "messages" | "claim" | "resolve" | "send" | "start";
+type SmsAction =
+  | "list"
+  | "messages"
+  | "claim"
+  | "resolve"
+  | "send"
+  | "start"
+  | "deleteThread";
 
 type AuthContext = {
   userId: string;
@@ -59,6 +66,23 @@ type SmsMessageRow = {
   created_at: string;
 };
 
+type SmsContactRow = {
+  id: string;
+  contact_type: "customer" | "owner";
+  display_name: string;
+  phone: string;
+  owner_uid: string | null;
+  created_by: string | null;
+  created_at: string;
+};
+
+type ParsedRoute =
+  | { kind: "inbox" }
+  | { kind: "threads_start" }
+  | { kind: "thread"; threadId: string; sub?: "messages" | "claim" | "resolve" }
+  | { kind: "contacts" }
+  | { kind: "contact"; contactId: string };
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -79,6 +103,107 @@ function requireString(value: unknown, field: string): string {
 
 function normalizePhone(value: string): string {
   return value.replace(/[\s().-]/g, "").trim();
+}
+
+function phoneDigits(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
+function phoneTailDigits(value: string): string {
+  const digits = phoneDigits(value);
+  if (!digits) return "";
+  if (digits.startsWith("61") && digits.length >= 11) return digits.slice(-9);
+  if (digits.startsWith("0") && digits.length >= 10) return digits.slice(-9);
+  return digits.length >= 9 ? digits.slice(-9) : digits;
+}
+
+function phonesEquivalent(a: string, b: string): boolean {
+  const da = phoneDigits(a);
+  const db = phoneDigits(b);
+  if (!da || !db) return false;
+  if (da === db) return true;
+  if (normalizePhone(a) === normalizePhone(b)) return true;
+  const tailA = phoneTailDigits(a);
+  const tailB = phoneTailDigits(b);
+  return Boolean(tailA && tailB && tailA.length >= 8 && tailA === tailB);
+}
+
+async function syncThreadNamesFromContact(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  phone: string,
+  displayName: string,
+): Promise<void> {
+  const { data: threads, error } = await supabaseAdmin
+    .from("sms_threads")
+    .select("id, customer_phone, customer_name");
+  if (error) throw error;
+
+  const updates = (threads ?? []).filter(
+    (thread) => !thread.customer_name?.trim() && phonesEquivalent(String(thread.customer_phone), phone),
+  );
+  if (!updates.length) return;
+
+  await Promise.all(
+    updates.map((thread) =>
+      supabaseAdmin
+        .from("sms_threads")
+        .update({ customer_name: displayName })
+        .eq("id", thread.id),
+    ),
+  );
+}
+
+function serializeContact(row: SmsContactRow) {
+  return {
+    id: row.id,
+    contactType: row.contact_type,
+    displayName: row.display_name,
+    phone: row.phone,
+    ownerUid: row.owner_uid,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+  };
+}
+
+function parseSmsPath(pathname: string): ParsedRoute | null {
+  let path = pathname;
+  for (const marker of ["/sms-api", "/api/sms", "/sms"]) {
+    const idx = path.indexOf(marker);
+    if (idx >= 0) {
+      path = path.slice(idx + marker.length);
+      break;
+    }
+  }
+  const parts = path.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts[0] === "inbox" && parts.length === 1) return { kind: "inbox" };
+  if (parts[0] === "contacts" && parts.length === 1) return { kind: "contacts" };
+  if (parts[0] === "contacts" && parts.length === 2) {
+    return { kind: "contact", contactId: parts[1] };
+  }
+  if (parts[0] === "threads" && parts.length === 2 && parts[1] === "start") {
+    return { kind: "threads_start" };
+  }
+  if (parts[0] === "threads" && parts.length >= 2) {
+    const threadId = parts[1];
+    const sub = parts[2] as "messages" | "claim" | "resolve" | undefined;
+    if (parts.length === 2) return { kind: "thread", threadId };
+    if (sub === "messages" || sub === "claim" || sub === "resolve") {
+      return { kind: "thread", threadId, sub };
+    }
+  }
+  return null;
+}
+
+function sanitizeSearchTerm(value: string): string {
+  return value.replace(/[%_\\]/g, "").trim().slice(0, 80);
+}
+
+function parseContactType(value: string | null): "customer" | "owner" | null {
+  if (!value) return null;
+  const v = value.trim().toLowerCase();
+  if (v === "customer" || v === "owner") return v;
+  return null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -187,10 +312,25 @@ async function listSms(supabaseAdmin: ReturnType<typeof createClient>, auth: Aut
     canSeeThread(auth, thread),
   );
 
+  const { data: contactRows, error: contactsError } = await supabaseAdmin
+    .from("sms_contacts")
+    .select("display_name, phone")
+    .eq("contact_type", "customer");
+  if (contactsError) throw contactsError;
+
+  const enrichedThreads = visibleThreads.map((thread) => {
+    if (thread.customer_name?.trim()) return thread;
+    const match = (contactRows ?? []).find((contact) =>
+      phonesEquivalent(String(contact.phone), String(thread.customer_phone)),
+    );
+    if (!match?.display_name?.trim()) return thread;
+    return { ...thread, customer_name: match.display_name.trim() };
+  });
+
   return {
     queues: queues ?? [],
-    threads: visibleThreads,
-    unreadCount: visibleThreads.reduce((sum, thread) => sum + Number(thread.unread_for_agent ?? 0), 0),
+    threads: enrichedThreads,
+    unreadCount: enrichedThreads.reduce((sum, thread) => sum + Number(thread.unread_for_agent ?? 0), 0),
   };
 }
 
@@ -471,6 +611,27 @@ async function sendMessage(
   }
 }
 
+async function deleteThread(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  auth: AuthContext,
+  body: Record<string, unknown>,
+) {
+  const threadId = requireString(body.threadId, "threadId");
+  const thread = await getThread(supabaseAdmin, threadId);
+  if (!canSeeThread(auth, thread)) {
+    return json({ error: "Thread not found" }, 404);
+  }
+  if (!canActOnThread(auth, thread) && auth.role !== "super-admin" && auth.role !== "supervisor") {
+    return json({ error: "Cannot delete this conversation" }, 403);
+  }
+
+  const { error } = await supabaseAdmin.from("sms_threads").delete().eq("id", threadId);
+  if (error) throw error;
+
+  await broadcastSmsUpdate(supabaseAdmin, "DELETED", { threadId });
+  return { ok: true };
+}
+
 async function startThread(
   supabaseAdmin: ReturnType<typeof createClient>,
   auth: AuthContext,
@@ -478,6 +639,9 @@ async function startThread(
 ) {
   const phone = normalizePhone(requireString(body.customerPhone ?? body.phone, "customerPhone"));
   const messageBody = requireString(body.messageBody ?? body.message, "messageBody");
+  const customerNameRaw = body.customerName ?? body.customer_name;
+  const customerName =
+    typeof customerNameRaw === "string" && customerNameRaw.trim() ? customerNameRaw.trim() : null;
   if (phone.replace(/\D/g, "").length < 6) {
     return json({ error: "Enter a valid customer phone number" }, 400);
   }
@@ -501,6 +665,7 @@ async function startThread(
       .from("sms_threads")
       .update({
         current_queue_id: queueId,
+        customer_name: customerName ?? existing.customer_name,
         assigned_agent_id: auth.agentId,
         assigned_agent_name: auth.agentName,
         status: "ACTIVE",
@@ -518,6 +683,7 @@ async function startThread(
       .from("sms_threads")
       .insert({
         customer_phone: phone,
+        customer_name: customerName,
         current_queue_id: queueId,
         assigned_agent_id: auth.agentId,
         assigned_agent_name: auth.agentName,
@@ -538,6 +704,7 @@ async function startThread(
         .from("sms_threads")
         .update({
           current_queue_id: queueId,
+          customer_name: customerName ?? raced.customer_name,
           assigned_agent_id: auth.agentId,
           assigned_agent_name: auth.agentName,
           status: "ACTIVE",
@@ -558,12 +725,281 @@ async function startThread(
   });
 }
 
+async function listContacts(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  url: URL,
+) {
+  const contactType =
+    parseContactType(url.searchParams.get("contactType") ?? url.searchParams.get("contact_type"));
+  const phoneRaw = url.searchParams.get("phone");
+  const ownerUid = url.searchParams.get("ownerUid") ?? url.searchParams.get("owner_uid");
+  const search = sanitizeSearchTerm(url.searchParams.get("search") ?? "");
+  const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") ?? 50) || 50));
+  const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
+
+  let query = supabaseAdmin.from("sms_contacts").select("*", { count: "exact" });
+  if (contactType) query = query.eq("contact_type", contactType);
+  if (phoneRaw?.trim()) query = query.eq("phone", normalizePhone(phoneRaw));
+  if (ownerUid?.trim()) query = query.eq("owner_uid", ownerUid.trim());
+  if (search) {
+    query = query.or(`display_name.ilike.%${search}%,phone.ilike.%${search}%`);
+  }
+
+  const { data, error, count } = await query
+    .order("display_name", { ascending: true })
+    .range(offset, offset + limit - 1);
+  if (error) throw error;
+
+  return {
+    contacts: ((data ?? []) as SmsContactRow[]).map(serializeContact),
+    total: count ?? 0,
+    limit,
+    offset,
+  };
+}
+
+async function getContact(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  contactId: string,
+) {
+  const { data, error } = await supabaseAdmin
+    .from("sms_contacts")
+    .select("*")
+    .eq("id", contactId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data?.id) return json({ error: "Contact not found" }, 404);
+  return { contact: serializeContact(data as SmsContactRow) };
+}
+
+async function createContact(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  auth: AuthContext,
+  body: Record<string, unknown>,
+) {
+  const contactType = parseContactType(
+    String(body.contactType ?? body.contact_type ?? ""),
+  );
+  if (!contactType) {
+    return json({ error: "contactType must be customer or owner" }, 400);
+  }
+  const displayName = requireString(body.displayName ?? body.display_name, "displayName");
+  const phone = normalizePhone(requireString(body.phone, "phone"));
+  if (phone.replace(/\D/g, "").length < 6) {
+    return json({ error: "Enter a valid phone number" }, 400);
+  }
+  const ownerUidRaw = body.ownerUid ?? body.owner_uid;
+  const ownerUid =
+    typeof ownerUidRaw === "string" && ownerUidRaw.trim() ? ownerUidRaw.trim() : null;
+
+  const { data, error } = await supabaseAdmin
+    .from("sms_contacts")
+    .insert({
+      contact_type: contactType,
+      display_name: displayName,
+      phone,
+      owner_uid: ownerUid,
+      created_by: auth.userId,
+    })
+    .select("*")
+    .single();
+  if (error) {
+    if (String(error.message).includes("duplicate") || error.code === "23505") {
+      return json({ error: "A contact with this phone already exists for that type" }, 409);
+    }
+    throw error;
+  }
+  if (contactType === "customer") {
+    await syncThreadNamesFromContact(supabaseAdmin, phone, displayName);
+  }
+  return { contact: serializeContact(data as SmsContactRow) };
+}
+
+async function updateContact(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  contactId: string,
+  body: Record<string, unknown>,
+) {
+  const existing = await supabaseAdmin
+    .from("sms_contacts")
+    .select("*")
+    .eq("id", contactId)
+    .maybeSingle();
+  if (existing.error) throw existing.error;
+  if (!existing.data?.id) return json({ error: "Contact not found" }, 404);
+
+  const patch: Record<string, unknown> = {};
+  const contactType = parseContactType(
+    String(body.contactType ?? body.contact_type ?? ""),
+  );
+  if (body.contactType !== undefined || body.contact_type !== undefined) {
+    if (!contactType) return json({ error: "contactType must be customer or owner" }, 400);
+    patch.contact_type = contactType;
+  }
+  if (body.displayName !== undefined || body.display_name !== undefined) {
+    patch.display_name = requireString(body.displayName ?? body.display_name, "displayName");
+  }
+  if (body.phone !== undefined) {
+    const phone = normalizePhone(requireString(body.phone, "phone"));
+    if (phone.replace(/\D/g, "").length < 6) {
+      return json({ error: "Enter a valid phone number" }, 400);
+    }
+    patch.phone = phone;
+  }
+  if (body.ownerUid !== undefined || body.owner_uid !== undefined) {
+    const ownerUidRaw = body.ownerUid ?? body.owner_uid;
+    patch.owner_uid =
+      typeof ownerUidRaw === "string" && ownerUidRaw.trim() ? ownerUidRaw.trim() : null;
+  }
+  if (Object.keys(patch).length === 0) {
+    return json({ error: "No fields to update" }, 400);
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("sms_contacts")
+    .update(patch)
+    .eq("id", contactId)
+    .select("*")
+    .single();
+  if (error) {
+    if (String(error.message).includes("duplicate") || error.code === "23505") {
+      return json({ error: "A contact with this phone already exists for that type" }, 409);
+    }
+    throw error;
+  }
+  return { contact: serializeContact(data as SmsContactRow) };
+}
+
+async function deleteContact(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  contactId: string,
+) {
+  const { data, error } = await supabaseAdmin
+    .from("sms_contacts")
+    .delete()
+    .eq("id", contactId)
+    .select("id")
+    .maybeSingle();
+  if (error) throw error;
+  if (!data?.id) return json({ error: "Contact not found" }, 404);
+  return { ok: true };
+}
+
+async function dispatchLegacyAction(
+  supabaseAdmin: ReturnType<typeof createClient>,
+  auth: AuthContext,
+  action: SmsAction,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  if (action === "list") return json(await listSms(supabaseAdmin, auth));
+  if (action === "messages") {
+    const result = await loadMessages(supabaseAdmin, auth, body);
+    return result instanceof Response ? result : json(result);
+  }
+  if (action === "claim") {
+    const result = await claimThread(supabaseAdmin, auth, body);
+    return result instanceof Response ? result : json(result);
+  }
+  if (action === "resolve") {
+    const result = await resolveThread(supabaseAdmin, auth, body);
+    return result instanceof Response ? result : json(result);
+  }
+  if (action === "send") {
+    const result = await sendMessage(supabaseAdmin, auth, body);
+    return result instanceof Response ? result : json(result);
+  }
+  if (action === "start") {
+    const result = await startThread(supabaseAdmin, auth, body);
+    return result instanceof Response ? result : json(result);
+  }
+  if (action === "deleteThread") {
+    const result = await deleteThread(supabaseAdmin, auth, body);
+    return result instanceof Response ? result : json(result);
+  }
+  return json({ error: `Unsupported action: ${action}` }, 400);
+}
+
+async function handleRestRequest(
+  req: Request,
+  supabaseAdmin: ReturnType<typeof createClient>,
+  auth: AuthContext,
+  route: ParsedRoute,
+): Promise<Response> {
+  const url = new URL(req.url);
+  const body = asRecord(await req.json().catch(() => ({})));
+
+  if (route.kind === "inbox") {
+    if (req.method !== "GET") return json({ error: "Method not allowed" }, 405);
+    return json(await listSms(supabaseAdmin, auth));
+  }
+
+  if (route.kind === "threads_start") {
+    if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
+    const result = await startThread(supabaseAdmin, auth, body);
+    return result instanceof Response ? result : json(result);
+  }
+
+  if (route.kind === "thread") {
+    const payload = { ...body, threadId: route.threadId };
+    if (route.sub === "messages") {
+      if (req.method === "GET") {
+        const result = await loadMessages(supabaseAdmin, auth, payload);
+        return result instanceof Response ? result : json(result);
+      }
+      if (req.method === "POST") {
+        const result = await sendMessage(supabaseAdmin, auth, payload);
+        return result instanceof Response ? result : json(result);
+      }
+      return json({ error: "Method not allowed" }, 405);
+    }
+    if (route.sub === "claim") {
+      if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
+      const result = await claimThread(supabaseAdmin, auth, payload);
+      return result instanceof Response ? result : json(result);
+    }
+    if (route.sub === "resolve") {
+      if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
+      const result = await resolveThread(supabaseAdmin, auth, payload);
+      return result instanceof Response ? result : json(result);
+    }
+    if (!route.sub && req.method === "DELETE") {
+      const result = await deleteThread(supabaseAdmin, auth, payload);
+      return result instanceof Response ? result : json(result);
+    }
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  if (route.kind === "contacts") {
+    if (req.method === "GET") return json(await listContacts(supabaseAdmin, url));
+    if (req.method === "POST") {
+      const result = await createContact(supabaseAdmin, auth, body);
+      return result instanceof Response ? result : json(result, 201);
+    }
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  if (route.kind === "contact") {
+    if (req.method === "GET") {
+      const result = await getContact(supabaseAdmin, route.contactId);
+      return result instanceof Response ? result : json(result);
+    }
+    if (req.method === "PATCH") {
+      const result = await updateContact(supabaseAdmin, route.contactId, body);
+      return result instanceof Response ? result : json(result);
+    }
+    if (req.method === "DELETE") {
+      const result = await deleteContact(supabaseAdmin, route.contactId);
+      return result instanceof Response ? result : json(result);
+    }
+    return json({ error: "Method not allowed" }, 405);
+  }
+
+  return json({ error: "Not found" }, 404);
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { status: 200, headers: corsHeaders });
-  }
-  if (req.method !== "POST") {
-    return json({ error: "Method not allowed" }, 405);
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
@@ -572,34 +1008,26 @@ Deno.serve(async (req) => {
 
   try {
     const auth = await getAuthContext(req, supabaseAdmin, supabaseUrl);
-    const body = asRecord(await req.json().catch(() => ({})));
-    const action = requireString(body.action, "action") as SmsAction;
+    const url = new URL(req.url);
+    const route = parseSmsPath(url.pathname);
 
-    if (action === "list") {
-      return json(await listSms(supabaseAdmin, auth));
-    }
-    if (action === "messages") {
-      const result = await loadMessages(supabaseAdmin, auth, body);
-      return result instanceof Response ? result : json(result);
-    }
-    if (action === "claim") {
-      const result = await claimThread(supabaseAdmin, auth, body);
-      return result instanceof Response ? result : json(result);
-    }
-    if (action === "resolve") {
-      const result = await resolveThread(supabaseAdmin, auth, body);
-      return result instanceof Response ? result : json(result);
-    }
-    if (action === "send") {
-      const result = await sendMessage(supabaseAdmin, auth, body);
-      return result instanceof Response ? result : json(result);
-    }
-    if (action === "start") {
-      const result = await startThread(supabaseAdmin, auth, body);
-      return result instanceof Response ? result : json(result);
+    if (route) {
+      return await handleRestRequest(req, supabaseAdmin, auth, route);
     }
 
-    return json({ error: `Unsupported action: ${action}` }, 400);
+    if (req.method === "POST") {
+      const body = asRecord(await req.json().catch(() => ({})));
+      if (typeof body.action === "string" && body.action.trim()) {
+        return await dispatchLegacyAction(
+          supabaseAdmin,
+          auth,
+          body.action.trim() as SmsAction,
+          body,
+        );
+      }
+    }
+
+    return json({ error: "Not found" }, 404);
   } catch (error) {
     if (error instanceof Response) {
       const text = await error.text();

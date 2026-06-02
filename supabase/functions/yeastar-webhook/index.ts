@@ -334,13 +334,6 @@ async function resolveAnsweredAgentFromCdr(
   return hit ?? fallbackLeg;
 }
 
-async function resolveTenantIdFromOutboundTrunk(body: Record<string, unknown>): Promise<string | null> {
-  const trunk = String(body.dst_trunk_name ?? body.desttrunkname ?? body.dst_trunk ?? '').trim();
-  if (!trunk || trunk === ' ') return null;
-  const { data } = await supabase.from('sip_lines').select('tenant_id').eq('trunk_name', trunk).maybeSingle();
-  return data?.tenant_id ?? null;
-}
-
 async function handleNewCdr(body: Record<string, unknown>) {
   const callid = String(body.callid ?? body.call_id ?? '');
   const timestart = String(body.timestart ?? body.time_start ?? '');
@@ -407,12 +400,8 @@ async function handleNewCdr(body: Record<string, unknown>) {
   const customerRaw = direction === 'inbound' ? rawFrom : rawTo;
   const customerNumber = extractYeastarPartyNumber(customerRaw) || customerRaw.replace(/\s+/g, '').trim();
 
-  // Some NewCdr payloads omit `did_number` but still provide the called number in `callto`.
-  // For inbound calls we treat that as a DID fallback so routing + persistence keep working.
-  const callToNumber =
-    extractYeastarPartyNumber(rawTo) || rawTo.replace(/\s+/g, '').trim();
-  const inboundDid = didFromPayload || callToNumber || null;
-  const didForMapping = direction === 'inbound' ? inboundDid : didFromPayload;
+  const inboundDid = didFromPayload || null;
+  const didForMapping = direction === 'inbound' ? inboundDid : null;
   const { data: mapping } = didForMapping
     ? await supabase
       .from('did_mappings')
@@ -436,7 +425,6 @@ async function handleNewCdr(body: Record<string, unknown>) {
     ? String(agentRow.queue_ids[0])
     : null;
 
-  const trunkTenantId = direction === 'outbound' ? await resolveTenantIdFromOutboundTrunk(body) : null;
   const existingTenantId =
     existingCallRes.data?.tenant_id && existingCallRes.data.tenant_id !== 'unknown'
       ? existingCallRes.data.tenant_id
@@ -446,8 +434,18 @@ async function handleNewCdr(body: Record<string, unknown>) {
       ? existingCallRes.data.queue_id
       : null;
 
-  const tenantId = mapping?.tenant_id ?? tenantIdFromAgent ?? trunkTenantId ?? existingTenantId ?? 'unknown';
-  const queueId = mapping?.queue_id ?? queueIdFromAgent ?? existingQueueId ?? 'unknown';
+  const tenantId =
+    direction === 'outbound'
+      ? (tenantIdFromAgent ?? existingTenantId ?? 'unknown')
+      : inboundDid
+        ? (mapping?.tenant_id ?? existingTenantId ?? 'unknown')
+        : (existingTenantId ?? 'unknown');
+  const queueId =
+    direction === 'outbound'
+      ? (queueIdFromAgent ?? existingQueueId ?? 'unknown')
+      : inboundDid
+        ? (mapping?.queue_id ?? existingQueueId ?? 'unknown')
+        : (existingQueueId ?? 'unknown');
   const callerName = await lookupCustomerName(tenantId, customerNumber);
 
   // Parse times
@@ -457,10 +455,7 @@ async function handleNewCdr(body: Record<string, unknown>) {
     ? new Date(startTime.getTime() + (callduraction - talkduraction) * 1000)
     : null;
 
-  const dialedNumber =
-    direction === 'inbound'
-      ? inboundDid
-      : customerNumber;
+  const dialedNumber = direction === 'inbound' ? inboundDid : null;
 
   const preLinkedAgentId = existingCallRes.data?.agent_id && String(existingCallRes.data.agent_id).trim()
     ? String(existingCallRes.data.agent_id)

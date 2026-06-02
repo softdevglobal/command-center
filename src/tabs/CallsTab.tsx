@@ -284,7 +284,7 @@ export function CallsTab({
           (mappedTenantLabel && mappedTenantLabel.toLowerCase().includes(s)) ||
           c.agentName.toLowerCase().includes(s) ||
           c.queueName.toLowerCase().includes(s) ||
-          c.tenantName.toLowerCase().includes(s) ||
+          (c.dialedNumber && c.tenantName.toLowerCase().includes(s)) ||
           dirLabel.includes(s) ||
           (c.callerName && c.callerName.toLowerCase().includes(s)) ||
           (resolvedName && resolvedName.toLowerCase().includes(s))
@@ -351,7 +351,9 @@ export function CallsTab({
     const mappedTenantLabel = c.dialedNumber
       ? didTenantLabelMap.get(c.dialedNumber)
       : undefined;
-    const tenantDisplayName = mappedTenantLabel || c.tenantName;
+    const tenantDisplayName = c.dialedNumber
+      ? (mappedTenantLabel || c.tenantName)
+      : null;
 
     return (
       <TableRow
@@ -398,17 +400,21 @@ export function CallsTab({
         </TableCell>
         {permissions.canViewTenantNames && (
           <TableCell>
-            <span
-              className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-semibold"
-              style={{
-                color: brandColor,
-                borderColor: `${brandColor}40`,
-                background: `${brandColor}12`,
-              }}
-            >
-              <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: brandColor }} />
-              {tenantDisplayName}
-            </span>
+            {tenantDisplayName ? (
+              <span
+                className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-sm font-semibold"
+                style={{
+                  color: brandColor,
+                  borderColor: `${brandColor}40`,
+                  background: `${brandColor}12`,
+                }}
+              >
+                <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: brandColor }} />
+                {tenantDisplayName}
+              </span>
+            ) : (
+              <span className="text-muted-foreground">—</span>
+            )}
           </TableCell>
         )}
         <TableCell className="max-w-[200px]">

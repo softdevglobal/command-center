@@ -1261,15 +1261,17 @@ export async function fetchCalls(
     const apiTenantName = c.tenant_name?.trim();
     const dbAgentName = effectiveAgentId ? agentMap.get(effectiveAgentId) : null;
 
+    const direction = resolveCallDirectionFromRow(rowForDirection);
+
     return {
       id: c.id,
       tenantId: c.tenant_id,
       queueId: c.queue_id,
       agentId: effectiveAgentId,
-      direction: resolveCallDirectionFromRow(rowForDirection),
+      direction,
       callerNumber: c.caller_number,
       callerName: c.caller_name,
-      dialedNumber: c.dialed_number ?? null,
+      dialedNumber: direction === "outbound" ? null : (c.dialed_number ?? null),
       startTime: c.start_time,
       answerTime: c.answer_time,
       endTime: c.end_time,

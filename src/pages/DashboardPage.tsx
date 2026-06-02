@@ -90,7 +90,7 @@ const AgentCompletedTab = lazy(() =>
 );
 
 import { fetchClients, createClient, advanceClientStage } from '@/services/dashboardApi';
-import { fetchChats } from '@/services/chatApi';
+import { fetchCallCenterChats, fetchConversations } from '@/services/chatApi';
 import { fetchSmsUnreadCount, subscribeToSmsUpdates } from '@/services/smsApi';
 import {
   fetchAllLeaveRequests,
@@ -254,8 +254,25 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
   const selectedSalesTenantId = session.tenantId || d.selectedTenant || null;
 
   const currentAgentDbId = useMemo(
-    () => d.agents.find((a) => a.userId === session.userId)?.id ?? null,
-    [d.agents, session.userId],
+    () => {
+      const byUserId = d.agents.find((a) => a.userId === session.userId);
+      if (byUserId?.id) return byUserId.id;
+
+      const email = session.authEmail?.trim().toLowerCase();
+      if (email) {
+        const byEmail = d.agents.find((a) => a.email?.trim().toLowerCase() === email);
+        if (byEmail?.id) return byEmail.id;
+      }
+
+      const displayName = session.displayName?.trim().toLowerCase();
+      if (displayName) {
+        const byName = d.agents.find((a) => a.name?.trim().toLowerCase() === displayName);
+        if (byName?.id) return byName.id;
+      }
+
+      return null;
+    },
+    [d.agents, session.userId, session.authEmail, session.displayName],
   );
 
   const [chatNavUnreadCount, setChatNavUnreadCount] = useState(0);
@@ -266,17 +283,31 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
   useEffect(() => {
     if (!permissions.canViewChatTab) return;
     if (d.selectedTab === 'chat') return;
-    if (!effectiveChatTenantId) return;
 
     let cancelled = false;
     const run = async () => {
       try {
-        const rows = await fetchChats({
-          tenantId: effectiveChatTenantId,
-          ownerUid: chatWorkshopOwnerUid,
-        });
+        const [supportChats, callCenterChats] = await Promise.all([
+          effectiveChatTenantId
+            ? fetchConversations({
+                tenantId: effectiveChatTenantId,
+                ownerUid: chatWorkshopOwnerUid,
+              }).catch(() => ({ queue: [], mine: [] }))
+            : Promise.resolve({ queue: [], mine: [] }),
+          fetchCallCenterChats(50).catch(() => []),
+        ]);
         if (!cancelled) {
-          setChatNavUnreadCount(rows.filter((c) => c.unreadForAgent).length);
+          const supportRows = [...supportChats.queue, ...supportChats.mine];
+          const supportIds = new Set(supportRows.map((c) => c.conversationId));
+          const mergedRows = [
+            ...supportRows,
+            ...callCenterChats.filter((c) => !supportIds.has(c.conversationId)),
+          ];
+          const unreadCount = mergedRows.reduce(
+            (sum, c) => sum + (Number(c.unreadForAgent) || 0),
+            0,
+          );
+          setChatNavUnreadCount(unreadCount);
         }
       } catch {
         /* ignore */

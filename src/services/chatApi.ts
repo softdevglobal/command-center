@@ -198,6 +198,12 @@ function asRecord(value: unknown): Record<string, unknown> {
   return {};
 }
 
+function toUnreadCount(value: unknown): number {
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
 function toConversation(raw: unknown): Conversation {
   const r = asRecord(raw);
   return {
@@ -215,8 +221,8 @@ function toConversation(raw: unknown): Conversation {
     lastMessage: String(r.lastMessage ?? r.lastMessageText ?? ''),
     lastMessageAt: String(r.lastMessageAt ?? ''),
     lastSender: String(r.lastSender ?? r.lastSenderId ?? ''),
-    unreadForAgent: Number(r.unreadForAgent ?? 0),
-    unreadForCustomer: Number(r.unreadForCustomer ?? 0),
+    unreadForAgent: toUnreadCount(r.unreadForAgent ?? r.unread_for_agent),
+    unreadForCustomer: toUnreadCount(r.unreadForCustomer ?? r.unread_for_customer),
     createdAt: String(r.createdAt ?? ''),
     updatedAt: String(r.updatedAt ?? ''),
     claimedAt: r.claimedAt == null ? null : String(r.claimedAt),
@@ -536,7 +542,9 @@ function toCallCenterWorkshopOwner(raw: unknown): CallCenterWorkshopOwner {
     name: String(r.name ?? ''),
     slug: String(r.slug ?? ''),
     logoUrl: String(r.logoUrl ?? ''),
-    contactPhone: String(r.contactPhone ?? ''),
+    contactPhone: String(
+      r.contactPhone ?? r.phone ?? r.mobile ?? r.contact_phone ?? '',
+    ),
     email: String(r.email ?? ''),
     timezone: String(r.timezone ?? ''),
     state: String(r.state ?? ''),
@@ -764,8 +772,10 @@ function ccChatToConversation(raw: unknown): Conversation {
     lastMessage: String(r.lastMessageText ?? ''),
     lastMessageAt: String(r.lastMessageAt ?? r.updatedAt ?? r.createdAt ?? ''),
     lastSender: lastSenderRole,
-    unreadForAgent: r.unreadForAgent === true ? 1 : 0,
-    unreadForCustomer: r.unreadForTenant === true ? 1 : 0,
+    unreadForAgent: toUnreadCount(r.unreadForAgent ?? r.unread_for_agent),
+    unreadForCustomer: toUnreadCount(
+      r.unreadForTenant ?? r.unreadForCustomer ?? r.unread_for_tenant ?? r.unread_for_customer,
+    ),
     createdAt: String(r.createdAt ?? ''),
     updatedAt: String(r.updatedAt ?? r.createdAt ?? ''),
     claimedAt: null,
