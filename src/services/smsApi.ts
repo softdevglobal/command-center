@@ -323,6 +323,37 @@ export async function sendSmsMessage(threadId: string, messageBody: string): Pro
   };
 }
 
+/** Operations not implemented on the Command Center :5050 `/api/sms` routes. */
+async function invokeSmsEdgeFunction(body: Record<string, unknown>): Promise<unknown> {
+  await syncSupabaseAuthSession();
+  const token = getAccessToken();
+  if (!token) throw new Error('Sign in to use SMS.');
+
+  const { data, error } = await supabase.functions.invoke('sms-api', {
+    body,
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (error) throw new Error(error.message || 'SMS API failed');
+
+  const raw = asRecord(data);
+  if (raw.error) throw new Error(String(raw.error));
+  return data;
+}
+
+/** Pull received SMS from TextBee into Supabase (supervisor / super-admin). */
+export async function syncInboundSmsFromTextBee(): Promise<{
+  imported: number;
+  skipped: number;
+  duplicates: number;
+}> {
+  const raw = asRecord(await invokeSmsEdgeFunction({ action: 'syncInbound' }));
+  return {
+    imported: Number(raw.imported ?? 0),
+    skipped: Number(raw.skipped ?? 0),
+    duplicates: Number(raw.duplicates ?? 0),
+  };
+}
+
 export async function startSmsThread(params: {
   customerPhone: string;
   messageBody: string;
@@ -601,8 +632,23 @@ export async function deleteSmsContact(contactId: string): Promise<void> {
 }
 
 export async function deleteSmsThread(threadId: string): Promise<void> {
-  const id = encodeURIComponent(threadId.trim());
-  await requestSms('DELETE', `/threads/${id}`);
+  const id = threadId.trim();
+  if (!id) throw new Error('Thread id is required');
+
+  // :5050 does not expose DELETE /api/sms/threads/:id — use Supabase sms-api edge function.
+  try {
+    await requestSms('DELETE', `/threads/${encodeURIComponent(id)}`);
+    return;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '';
+    const missingOnBackend =
+      message.includes('404') ||
+      message.includes('Cannot DELETE') ||
+      message.includes('Not found');
+    if (!missingOnBackend) throw err;
+  }
+
+  await invokeSmsEdgeFunction({ action: 'deleteThread', threadId: id });
 }
 
 export async function fetchSmsUnreadCount(): Promise<number> {
@@ -611,11 +657,23 @@ export async function fetchSmsUnreadCount(): Promise<number> {
 }
 
 export function subscribeToSmsUpdates(onUpdate: (payload: SmsUpdatePayload) => void): () => void {
+  const notify = () => onUpdate({ type: 'REFRESH' });
+
   const channel = supabase
     .channel('sms-center')
     .on('broadcast', { event: 'SMS_UPDATED' }, ({ payload }) => {
       onUpdate(payload as SmsUpdatePayload);
     })
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'sms_threads' },
+      notify,
+    )
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'sms_messages' },
+      notify,
+    )
     .subscribe();
 
   return () => {

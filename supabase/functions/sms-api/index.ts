@@ -7,6 +7,7 @@ declare const Deno: {
 
 // @ts-expect-error Supabase Edge Functions resolve this remote ESM import at runtime.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { syncInboundFromTextBee } from "../_shared/textbeeInbound.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -26,7 +27,8 @@ type SmsAction =
   | "resolve"
   | "send"
   | "start"
-  | "deleteThread";
+  | "deleteThread"
+  | "syncInbound";
 
 type AuthContext = {
   userId: string;
@@ -78,6 +80,7 @@ type SmsContactRow = {
 
 type ParsedRoute =
   | { kind: "inbox" }
+  | { kind: "inbound_sync" }
   | { kind: "threads_start" }
   | { kind: "thread"; threadId: string; sub?: "messages" | "claim" | "resolve" }
   | { kind: "contacts" }
@@ -177,6 +180,9 @@ function parseSmsPath(pathname: string): ParsedRoute | null {
   const parts = path.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean);
   if (parts.length === 0) return null;
   if (parts[0] === "inbox" && parts.length === 1) return { kind: "inbox" };
+  if (parts[0] === "inbound" && parts[1] === "sync" && parts.length === 2) {
+    return { kind: "inbound_sync" };
+  }
   if (parts[0] === "contacts" && parts.length === 1) return { kind: "contacts" };
   if (parts[0] === "contacts" && parts.length === 2) {
     return { kind: "contact", contactId: parts[1] };
@@ -368,17 +374,41 @@ async function getThread(
   return data as SmsThreadRow;
 }
 
+function canonicalSmsPhone(value: string): string {
+  const digits = phoneDigits(value);
+  if (!digits) return normalizePhone(value);
+  if (digits.startsWith("61") && digits.length >= 11) return `+${digits}`;
+  if (digits.startsWith("0") && digits.length === 10) return `+61${digits.slice(1)}`;
+  if (digits.length === 9) return `+61${digits}`;
+  return value.trim().startsWith("+") ? normalizePhone(value) : `+${digits}`;
+}
+
 async function getThreadByPhone(
   supabaseAdmin: ReturnType<typeof createClient>,
   phone: string,
 ): Promise<SmsThreadRow | null> {
-  const { data, error } = await supabaseAdmin
+  const canonical = canonicalSmsPhone(phone);
+  for (const candidate of [canonical, normalizePhone(phone), phone.trim()]) {
+    if (!candidate) continue;
+    const { data, error } = await supabaseAdmin
+      .from("sms_threads")
+      .select("*, queue:sms_queues(id, queue_name)")
+      .eq("customer_phone", candidate)
+      .maybeSingle();
+    if (error) throw error;
+    if (data?.id) return data as SmsThreadRow;
+  }
+
+  const { data: rows, error: listError } = await supabaseAdmin
     .from("sms_threads")
     .select("*, queue:sms_queues(id, queue_name)")
-    .eq("customer_phone", phone)
-    .maybeSingle();
-  if (error) throw error;
-  return data?.id ? (data as SmsThreadRow) : null;
+    .order("updated_at", { ascending: false })
+    .limit(500);
+  if (listError) throw listError;
+  const match = (rows ?? []).find((row) =>
+    phonesEquivalent(String(row.customer_phone), phone),
+  );
+  return match ? (match as SmsThreadRow) : null;
 }
 
 async function resolveQueueId(
@@ -637,7 +667,7 @@ async function startThread(
   auth: AuthContext,
   body: Record<string, unknown>,
 ) {
-  const phone = normalizePhone(requireString(body.customerPhone ?? body.phone, "customerPhone"));
+  const phone = canonicalSmsPhone(requireString(body.customerPhone ?? body.phone, "customerPhone"));
   const messageBody = requireString(body.messageBody ?? body.message, "messageBody");
   const customerNameRaw = body.customerName ?? body.customer_name;
   const customerName =
@@ -916,6 +946,12 @@ async function dispatchLegacyAction(
     const result = await deleteThread(supabaseAdmin, auth, body);
     return result instanceof Response ? result : json(result);
   }
+  if (action === "syncInbound") {
+    if (auth.role !== "super-admin" && auth.role !== "supervisor") {
+      return json({ error: "Insufficient permissions" }, 403);
+    }
+    return json(await syncInboundFromTextBee(supabaseAdmin));
+  }
   return json({ error: `Unsupported action: ${action}` }, 400);
 }
 
@@ -931,6 +967,14 @@ async function handleRestRequest(
   if (route.kind === "inbox") {
     if (req.method !== "GET") return json({ error: "Method not allowed" }, 405);
     return json(await listSms(supabaseAdmin, auth));
+  }
+
+  if (route.kind === "inbound_sync") {
+    if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
+    if (auth.role !== "super-admin" && auth.role !== "supervisor") {
+      return json({ error: "Insufficient permissions" }, 403);
+    }
+    return json(await syncInboundFromTextBee(supabaseAdmin));
   }
 
   if (route.kind === "threads_start") {
