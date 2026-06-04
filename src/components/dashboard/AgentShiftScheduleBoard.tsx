@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { Agent, AgentShiftSchedule } from "@/services/types";
+import { useMemo, useState, useEffect } from "react";
+import { Agent, AgentShiftSchedule, Queue } from "@/services/types";
 import { fetchAgentShiftSchedules, upsertAgentShiftSchedule } from "@/services/attendanceApi";
 import {
   Table,
@@ -20,9 +20,17 @@ import {
 } from "@/components/ui/popover";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface AgentShiftScheduleBoardProps {
   agents: Agent[];
+  queues: Queue[];
 }
 
 const DAYS = [
@@ -37,11 +45,13 @@ const DAYS = [
 
 const DEFAULT_SHIFT_START = "09:00";
 const DEFAULT_SHIFT_END = "18:00";
+const NO_QUEUE_VALUE = "__no_queue__";
 
 function blankSchedule(agentId: string): AgentShiftSchedule {
   return {
     id: "",
     agentId,
+    dayQueueIds: {},
     monday: null,
     tuesday: null,
     wednesday: null,
@@ -110,12 +120,19 @@ function formatShift(isOff: boolean, start: string, end: string): string | null 
 
 function ShiftCell({
   value,
-  onChange,
+  queueId,
+  queueOptions,
+  onShiftChange,
+  onQueueChange,
 }: {
   value: string | null;
-  onChange: (newVal: string | null) => void;
+  queueId: string | null;
+  queueOptions: Queue[];
+  onShiftChange: (newVal: string | null) => void;
+  onQueueChange: (queueId: string | null) => void;
 }) {
   const { isOff, start, end } = parseShift(value);
+  const selectedQueue = queueOptions.find((queue) => queue.id === queueId);
 
   return (
     <Popover>
@@ -123,7 +140,7 @@ function ShiftCell({
         <Button
           variant="outline"
           size="sm"
-          className={`h-8 w-full justify-start font-normal px-2 ${
+          className={`h-auto min-h-8 w-full justify-start px-2 py-1 font-normal ${
             isOff ? "text-muted-foreground bg-slate-50" : "text-slate-950 font-medium border-emerald-100 bg-emerald-50/30"
           }`}
         >
@@ -133,43 +150,75 @@ function ShiftCell({
               OFF
             </span>
           ) : (
-            <span className="flex items-center gap-1.5 truncate">
-              <Clock className="h-3 w-3 text-emerald-600" />
-              {formatTimeForApi(start)}–{formatTimeForApi(end)}
+            <span className="flex min-w-0 flex-col items-start gap-0.5">
+              <span className="flex items-center gap-1.5 truncate">
+                <Clock className="h-3 w-3 text-emerald-600" />
+                {formatTimeForApi(start)}–{formatTimeForApi(end)}
+              </span>
+              <span className="max-w-full truncate text-[10px] font-semibold text-sky-700">
+                {selectedQueue ? selectedQueue.name : "No queue"}
+              </span>
             </span>
           )}
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-64 p-4 shadow-xl border-slate-200" align="start">
+      <PopoverContent className="w-72 p-4 shadow-xl border-slate-200" align="start">
         <div className="space-y-4">
           <div className="flex items-center justify-between border-b pb-3 border-slate-100">
             <Label htmlFor="off-toggle" className="font-semibold text-slate-900">Mark as Day Off</Label>
             <Switch
               id="off-toggle"
               checked={isOff}
-              onCheckedChange={(checked) => onChange(formatShift(checked, start, end))}
+              onCheckedChange={(checked) => {
+                onShiftChange(formatShift(checked, start, end));
+                if (checked) onQueueChange(null);
+              }}
             />
           </div>
 
           {!isOff && (
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Start Time</Label>
-                <Input
-                  type="time"
-                  value={start}
-                  onChange={(e) => onChange(formatShift(false, e.target.value, end))}
-                  className="h-9 focus-visible:ring-emerald-500"
-                />
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Start Time</Label>
+                  <Input
+                    type="time"
+                    value={start}
+                    onChange={(e) => onShiftChange(formatShift(false, e.target.value, end))}
+                    className="h-9 focus-visible:ring-emerald-500"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">End Time</Label>
+                  <Input
+                    type="time"
+                    value={end}
+                    onChange={(e) => onShiftChange(formatShift(false, start, e.target.value))}
+                    className="h-9 focus-visible:ring-emerald-500"
+                  />
+                </div>
               </div>
+
               <div className="space-y-1.5">
-                <Label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">End Time</Label>
-                <Input
-                  type="time"
-                  value={end}
-                  onChange={(e) => onChange(formatShift(false, start, e.target.value))}
-                  className="h-9 focus-visible:ring-emerald-500"
-                />
+                <Label className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Queue</Label>
+                <Select
+                  value={queueId || NO_QUEUE_VALUE}
+                  onValueChange={(nextQueueId) =>
+                    onQueueChange(nextQueueId === NO_QUEUE_VALUE ? null : nextQueueId)
+                  }
+                >
+                  <SelectTrigger className="h-9 focus:ring-emerald-500">
+                    <SelectValue placeholder="Select queue" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_QUEUE_VALUE}>No queue assigned</SelectItem>
+                    {queueOptions.map((queue) => (
+                      <SelectItem key={queue.id} value={queue.id}>
+                        {queue.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           )}
@@ -185,11 +234,12 @@ function ShiftCell({
   );
 }
 
-export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps) {
+export function AgentShiftScheduleBoard({ agents, queues }: AgentShiftScheduleBoardProps) {
   const [loading, setLoading] = useState(true);
   const [schedules, setSchedules] = useState<Record<string, AgentShiftSchedule>>({});
   const [search, setSearch] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
+  const queuesById = useMemo(() => new Map(queues.map((queue) => [queue.id, queue])), [queues]);
 
   useEffect(() => {
     async function load() {
@@ -214,7 +264,7 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
     load();
   }, []);
 
-  const handleUpdate = (agentId: string, day: (typeof DAYS)[number], value: string | null) => {
+  const handleShiftUpdate = (agentId: string, day: (typeof DAYS)[number], value: string | null) => {
     setSchedules((prev) => ({
       ...prev,
       [agentId]: {
@@ -222,6 +272,22 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
         [day]: value,
       } as AgentShiftSchedule,
     }));
+  };
+
+  const handleQueueUpdate = (agentId: string, day: (typeof DAYS)[number], queueId: string | null) => {
+    setSchedules((prev) => {
+      const current = prev[agentId] || blankSchedule(agentId);
+      return {
+        ...prev,
+        [agentId]: {
+          ...current,
+          dayQueueIds: {
+            ...(current.dayQueueIds ?? {}),
+            [day]: queueId,
+          },
+        },
+      };
+    });
   };
 
   const handleSave = async (agentId: string) => {
@@ -248,6 +314,18 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
   const filteredAgents = agents.filter((a) =>
     a.name.toLowerCase().includes(search.toLowerCase())
   );
+
+  const queueOptionsForAgent = (agent: Agent, selectedQueueId?: string | null) => {
+    const tenantQueues = queues.filter((queue) => queue.tenantId === agent.tenantId);
+    const options = tenantQueues.length > 0 ? tenantQueues : queues;
+    const selectedQueue = selectedQueueId ? queuesById.get(selectedQueueId) : undefined;
+
+    if (selectedQueue && !options.some((queue) => queue.id === selectedQueue.id)) {
+      return [...options, selectedQueue];
+    }
+
+    return options;
+  };
 
   if (loading) {
     return (
@@ -281,7 +359,9 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
                   {day}
                 </TableHead>
               ))}
-              <TableHead className="w-[80px] text-right text-slate-600 font-semibold">Sync</TableHead>
+              <TableHead className="sticky right-0 z-20 w-[80px] bg-slate-50/95 text-right font-semibold text-slate-600 shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.35)]">
+                Sync
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -292,11 +372,14 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
                   <TableCell key={day}>
                     <ShiftCell
                       value={schedules[agent.id]?.[day] ?? null}
-                      onChange={(newVal) => handleUpdate(agent.id, day, newVal)}
+                      queueId={schedules[agent.id]?.dayQueueIds?.[day] ?? null}
+                      queueOptions={queueOptionsForAgent(agent, schedules[agent.id]?.dayQueueIds?.[day])}
+                      onShiftChange={(newVal) => handleShiftUpdate(agent.id, day, newVal)}
+                      onQueueChange={(queueId) => handleQueueUpdate(agent.id, day, queueId)}
                     />
                   </TableCell>
                 ))}
-                <TableCell className="text-right">
+                <TableCell className="sticky right-0 z-10 bg-white text-right shadow-[-8px_0_12px_-12px_rgba(15,23,42,0.28)]">
                   <Button
                     size="sm"
                     variant="ghost"

@@ -1,4 +1,4 @@
-import type { Agent, Permissions, Tenant, UserSession } from "@/services/types";
+import type { Agent, Permissions, Queue, Tenant, UserSession } from "@/services/types";
 import { AgentAttendanceCard } from "@/components/dashboard/AgentAttendanceCard";
 import { AgentLeaveRequestsCard } from "@/components/dashboard/AgentLeaveRequestsCard";
 import { SuperAdminAttendanceBoard } from "@/components/dashboard/SuperAdminAttendanceBoard";
@@ -10,6 +10,7 @@ interface AttendanceTabProps {
   session: UserSession;
   permissions: Permissions;
   agents: Agent[];
+  queues: Queue[];
   tenants: Tenant[];
   now: number;
   /** Which area of Attendance to show. */
@@ -20,6 +21,7 @@ export function AttendanceTab({
   session,
   permissions,
   agents,
+  queues,
   tenants,
   now,
   section,
@@ -31,7 +33,7 @@ export function AttendanceTab({
   if (session.role === "super-admin") {
     if (section === "shifts") {
       return (
-        <div className="cc-fade-in mx-auto max-w-7xl space-y-6">
+        <div className="cc-fade-in mx-auto w-9xl space-y-6">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Time tracking</h1>
             <p className="mt-1 text-sm text-muted-foreground">
@@ -48,10 +50,10 @@ export function AttendanceTab({
           <div>
             <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Shift schedule</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              Define the weekly working hours for each agent.
+              Define weekly working hours and queue assignments for each agent.
             </p>
           </div>
-          <AgentShiftScheduleBoard agents={agents} />
+          <AgentShiftScheduleBoard agents={agents} queues={queues} />
         </div>
       );
     }
@@ -88,10 +90,10 @@ export function AttendanceTab({
           <div>
             <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Shift schedule</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              Your weekly working hours as defined by the admin.
+              Your weekly working hours and queue assignments as defined by the admin.
             </p>
           </div>
-          <AgentShiftScheduleView session={session} agents={agents} />
+          <AgentShiftScheduleView session={session} agents={agents} queues={queues} />
         </div>
       );
     }

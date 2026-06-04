@@ -9,6 +9,7 @@ const TABS_NEED_QUEUES = new Set([
   'overview',
   'calls',
   'agents',
+  'shift-schedule',
   'sales-suburbs',
   'sales-workshops',
   'sales-progress',

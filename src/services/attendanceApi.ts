@@ -21,6 +21,8 @@ const AGENT_SHIFT_SCHEDULES_API_URL =
   (import.meta.env.VITE_AGENT_SHIFT_SCHEDULES_API_URL as string | undefined)?.trim().replace(/\/+$/, "") ||
   `${API_BASE}/agent-shift-schedules`;
 
+const SHIFT_SCHEDULE_QUEUE_ASSIGNMENTS_STORAGE_KEY = "cc_shift_schedule_queue_assignments_v1";
+
 export const ATTENDANCE_EVENT_TYPES = [
   "clock_in",
   "break_start",
@@ -62,6 +64,25 @@ const SHIFT_SCHEDULE_DAYS = [
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type ShiftScheduleDay = (typeof SHIFT_SCHEDULE_DAYS)[number];
+
+type UntypedSupabase = {
+  from: (table: string) => UntypedSupabaseQuery;
+};
+
+type UntypedSupabaseQuery = PromiseLike<{
+  data: Array<Record<string, unknown>> | null;
+  error: { message?: string } | null;
+}> & {
+  select: (...args: unknown[]) => UntypedSupabaseQuery;
+  upsert: (...args: unknown[]) => UntypedSupabaseQuery;
+  delete: (...args: unknown[]) => UntypedSupabaseQuery;
+  eq: (...args: unknown[]) => UntypedSupabaseQuery;
+  in: (...args: unknown[]) => UntypedSupabaseQuery;
+};
+
+const dynamicSupabase = supabase as unknown as UntypedSupabase;
 
 export function isSupabaseAuthUserId(id: string | null | undefined): boolean {
   if (!id) return false;
@@ -184,6 +205,79 @@ function normalizeShiftScheduleValue(raw: unknown): string | null {
   return text;
 }
 
+function normalizeShiftScheduleQueueId(raw: unknown): string | null {
+  if (raw == null) return null;
+  const text = String(raw).trim();
+  return text || null;
+}
+
+function readLocalShiftScheduleQueueAssignments(): Record<string, Partial<Record<ShiftScheduleDay, string | null>>> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(SHIFT_SCHEDULE_QUEUE_ASSIGNMENTS_STORAGE_KEY) ?? "{}",
+    ) as unknown;
+    const raw = asRecord(parsed);
+    return Object.entries(raw).reduce(
+      (acc, [agentId, value]) => {
+        const dayMap = asRecord(value);
+        acc[agentId] = SHIFT_SCHEDULE_DAYS.reduce(
+          (days, day) => {
+            days[day] = normalizeShiftScheduleQueueId(dayMap[day]);
+            return days;
+          },
+          {} as Partial<Record<ShiftScheduleDay, string | null>>,
+        );
+        return acc;
+      },
+      {} as Record<string, Partial<Record<ShiftScheduleDay, string | null>>>,
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalShiftScheduleQueueAssignments(
+  agentId: string,
+  dayQueueIds: Partial<Record<ShiftScheduleDay, string | null>>,
+): void {
+  if (typeof window === "undefined") return;
+  const assignments = readLocalShiftScheduleQueueAssignments();
+  assignments[agentId] = {
+    ...(assignments[agentId] ?? {}),
+    ...dayQueueIds,
+  };
+  window.localStorage.setItem(
+    SHIFT_SCHEDULE_QUEUE_ASSIGNMENTS_STORAGE_KEY,
+    JSON.stringify(assignments),
+  );
+}
+
+function dayQueueKeys(day: (typeof SHIFT_SCHEDULE_DAYS)[number]): string[] {
+  const titleDay = `${day[0].toUpperCase()}${day.slice(1)}`;
+  return [`${day}QueueId`, `${day}_queue_id`, `${day}Queue`, `${day}_queue`, `queue${titleDay}Id`];
+}
+
+function normalizeShiftScheduleDayQueueIds(
+  row: Record<string, unknown>,
+): Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null> {
+  const queueMap = asRecord(
+    row.dayQueueIds ?? row.day_queue_ids ?? row.queueAssignments ?? row.queue_assignments,
+  );
+
+  return SHIFT_SCHEDULE_DAYS.reduce(
+    (acc, day) => {
+      acc[day] =
+        normalizeShiftScheduleQueueId(queueMap[day]) ??
+        normalizeShiftScheduleQueueId(queueMap[`${day}QueueId`]) ??
+        normalizeShiftScheduleQueueId(queueMap[`${day}_queue_id`]) ??
+        pickNullableString(row, dayQueueKeys(day));
+      return acc;
+    },
+    {} as Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null>,
+  );
+}
+
 function normalizeAgentShiftSchedule(raw: unknown): AgentShiftSchedule {
   const row = asRecord(raw);
   const agentId = pickString(row, ["agentId", "agent_id", "agent"]);
@@ -193,6 +287,7 @@ function normalizeAgentShiftSchedule(raw: unknown): AgentShiftSchedule {
     id: pickString(row, ["id", "scheduleId", "schedule_id"]) || resolvedAgentId,
     agentId: resolvedAgentId,
     userId,
+    dayQueueIds: normalizeShiftScheduleDayQueueIds(row),
     monday: normalizeShiftScheduleValue(row.monday),
     tuesday: normalizeShiftScheduleValue(row.tuesday),
     wednesday: normalizeShiftScheduleValue(row.wednesday),
@@ -220,33 +315,140 @@ function extractShiftSchedules(raw: unknown): AgentShiftSchedule[] {
 
 function shiftSchedulePayload(
   schedule: Partial<AgentShiftSchedule>,
-): Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null> {
-  return SHIFT_SCHEDULE_DAYS.reduce(
-    (payload, day) => {
-      payload[day] = normalizeShiftScheduleValue(schedule[day]);
-      return payload;
+): Record<string, unknown> {
+  const dayQueueIds = {} as Record<ShiftScheduleDay, string | null>;
+
+  const payload = SHIFT_SCHEDULE_DAYS.reduce(
+    (acc, day) => {
+      const shiftValue = normalizeShiftScheduleValue(schedule[day]);
+      const queueId = shiftValue ? normalizeShiftScheduleQueueId(schedule.dayQueueIds?.[day]) : null;
+      dayQueueIds[day] = queueId;
+      acc[day] = shiftValue;
+      acc[`${day}QueueId`] = queueId;
+      acc[`${day}_queue_id`] = queueId;
+      return acc;
     },
-    {} as Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null>,
+    {} as Record<string, unknown>,
   );
+
+  return {
+    ...payload,
+    dayQueueIds,
+    day_queue_ids: dayQueueIds,
+  };
+}
+
+function dayQueueIdsFromPayload(payload: Record<string, unknown>): Record<ShiftScheduleDay, string | null> {
+  const rawMap = asRecord(payload.dayQueueIds ?? payload.day_queue_ids);
+  return SHIFT_SCHEDULE_DAYS.reduce(
+    (acc, day) => {
+      acc[day] = normalizeShiftScheduleQueueId(rawMap[day]);
+      return acc;
+    },
+    {} as Record<ShiftScheduleDay, string | null>,
+  );
+}
+
+async function fetchPersistedShiftScheduleQueueAssignments(
+  agentIds: string[],
+): Promise<Record<string, Partial<Record<ShiftScheduleDay, string | null>>>> {
+  const uniqueAgentIds = Array.from(new Set(agentIds.map((id) => id.trim()).filter(Boolean)));
+  if (uniqueAgentIds.length === 0) return {};
+  const localAssignments = readLocalShiftScheduleQueueAssignments();
+  const localMatches = uniqueAgentIds.reduce(
+    (acc, agentId) => {
+      if (localAssignments[agentId]) acc[agentId] = localAssignments[agentId];
+      return acc;
+    },
+    {} as Record<string, Partial<Record<ShiftScheduleDay, string | null>>>,
+  );
+
+  let query = dynamicSupabase
+    .from("agent_shift_schedules")
+    .select(
+      "agent_id, monday_queue_id, tuesday_queue_id, wednesday_queue_id, thursday_queue_id, friday_queue_id, saturday_queue_id, sunday_queue_id",
+    );
+  query = query.in("agent_id", uniqueAgentIds);
+  const { data, error } = await query;
+  if (error) {
+    console.warn("Failed to load persisted shift queue assignments", error.message);
+    return localMatches;
+  }
+
+  return (data ?? []).reduce(
+    (acc, row) => {
+      const agentId = pickString(row, ["agent_id", "agentId"]);
+      if (!agentId) return acc;
+      acc[agentId] = {
+        ...(acc[agentId] ?? {}),
+        ...SHIFT_SCHEDULE_DAYS.reduce(
+          (days, day) => {
+            days[day] = normalizeShiftScheduleQueueId(row[`${day}_queue_id`]);
+            return days;
+          },
+          {} as Partial<Record<ShiftScheduleDay, string | null>>,
+        ),
+      };
+      return acc;
+    },
+    localMatches,
+  );
+}
+
+function mergePersistedQueueAssignments(
+  schedules: AgentShiftSchedule[],
+  assignments: Record<string, Partial<Record<ShiftScheduleDay, string | null>>>,
+): AgentShiftSchedule[] {
+  return schedules.map((schedule) => ({
+    ...schedule,
+    dayQueueIds: {
+      ...(schedule.dayQueueIds ?? {}),
+      ...(assignments[schedule.agentId] ?? {}),
+    },
+  }));
+}
+
+async function persistShiftScheduleQueueAssignments(
+  agentId: string,
+  dayQueueIds: Partial<Record<ShiftScheduleDay, string | null>>,
+): Promise<void> {
+  writeLocalShiftScheduleQueueAssignments(agentId, dayQueueIds);
+  const row = SHIFT_SCHEDULE_DAYS.reduce(
+    (acc, day) => {
+      acc[`${day}_queue_id`] = normalizeShiftScheduleQueueId(dayQueueIds[day]);
+      return acc;
+    },
+    {
+      agent_id: agentId,
+      updated_at: new Date().toISOString(),
+    } as Record<string, unknown>,
+  );
+  const { error } = await dynamicSupabase
+    .from("agent_shift_schedules")
+    .upsert(row, { onConflict: "agent_id" });
+  if (error) {
+    console.warn("Failed to persist shift queue assignments", error.message);
+  }
 }
 
 function extractShiftSchedule(
   raw: unknown,
   fallbackAgentId: string,
-  fallbackPayload: Record<(typeof SHIFT_SCHEDULE_DAYS)[number], string | null>,
+  fallbackPayload: Record<string, unknown>,
 ): AgentShiftSchedule {
+  const fallbackSchedule = { agentId: fallbackAgentId, ...fallbackPayload };
   const body = asRecord(raw);
   for (const key of ["agentShiftSchedule", "shiftSchedule", "schedule", "data", "item", "row", "result"]) {
     const value = body[key];
     if (value && typeof value === "object" && !Array.isArray(value)) {
       const schedule = normalizeAgentShiftSchedule(value);
-      return schedule.agentId ? schedule : normalizeAgentShiftSchedule({ agentId: fallbackAgentId, ...fallbackPayload });
+      return schedule.agentId ? schedule : normalizeAgentShiftSchedule(fallbackSchedule);
     }
   }
 
   const direct = normalizeAgentShiftSchedule(raw);
   if (direct.agentId) return direct;
-  return normalizeAgentShiftSchedule({ agentId: fallbackAgentId, ...fallbackPayload });
+  return normalizeAgentShiftSchedule(fallbackSchedule);
 }
 
 function normalizeAttendanceEvent(raw: unknown): AgentAttendanceEventRow {
@@ -827,7 +1029,11 @@ export async function fetchAgentShiftSchedules(): Promise<AgentShiftSchedule[]> 
     const detail = await readHttpErrorDetail(res);
     throw new Error(`Shift schedules API failed: ${res.status}${detail ? ` - ${detail}` : ""}`);
   }
-  return extractShiftSchedules(await readJsonBody(res));
+  const schedules = extractShiftSchedules(await readJsonBody(res));
+  const assignments = await fetchPersistedShiftScheduleQueueAssignments(
+    schedules.map((schedule) => schedule.agentId),
+  );
+  return mergePersistedQueueAssignments(schedules, assignments);
 }
 
 type MyShiftScheduleLookup =
@@ -879,6 +1085,7 @@ export async function upsertAgentShiftSchedule(
 
   const agentId = schedule.agentId.trim();
   const payload = shiftSchedulePayload(schedule);
+  const dayQueueIds = dayQueueIdsFromPayload(payload);
   const res = await shiftSchedulesFetch(`/${encodeURIComponent(agentId)}`, {
     method: "PUT",
     body: JSON.stringify(payload),
@@ -890,11 +1097,19 @@ export async function upsertAgentShiftSchedule(
   }
 
   const saved = extractShiftSchedule(await readJsonBody(res), agentId, payload);
+  await persistShiftScheduleQueueAssignments(agentId, dayQueueIds);
+  const savedWithPersistedQueues = {
+    ...saved,
+    dayQueueIds: {
+      ...(saved.dayQueueIds ?? {}),
+      ...dayQueueIds,
+    },
+  };
   void postSystemAuditLog({
     action: AUDIT_ACTION_SHIFT_SCHEDULE_UPDATE,
     resourceType: "agent_shift_schedule",
     resourceId: agentId,
     details: { schedule: payload },
   }).catch(() => {});
-  return saved;
+  return savedWithPersistedQueues;
 }

@@ -20,7 +20,7 @@ import {
   formatSeconds,
   formatTime,
 } from "@/utils/formatters";
-import { formatTimeAu } from "@/utils/australianTime";
+import { AU_DASHBOARD_TIMEZONE, formatTimeAu } from "@/utils/australianTime";
 import {
   buildIncomingCallSnapshot,
   buildLiveCallSnapshot,
@@ -28,6 +28,8 @@ import {
   clearCallDetailSession,
   type CallDetailSnapshot,
 } from "@/components/dashboard/CallDetailsSheet";
+import { fetchMyShiftSchedule } from "@/services/attendanceApi";
+import { supabase } from "@/integrations/supabase/client";
 import { MetricCard } from "@/components/dashboard/MetricCard";
 import { QueueSummaryCard } from "@/components/dashboard/QueueSummaryCard";
 import { LiveDot } from "@/components/dashboard/LiveDot";
@@ -46,6 +48,18 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useCallNotification } from "@/context/CallNotificationContext";
+
+const SCHEDULE_DAYS = [
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday",
+] as const;
+
+type ScheduleDay = (typeof SCHEDULE_DAYS)[number];
 
 interface OverviewTabProps {
   summary: DashboardSummary | null;
@@ -84,6 +98,19 @@ export function OverviewTab({
     incomingCallsForQueueCards ?? incomingCalls ?? [];
   const { selectedCall, setSelectedCall } = useCallNotification();
   const restoredFromSession = useRef(false);
+  const [todayAssignedQueueId, setTodayAssignedQueueId] = useState<string | null>(null);
+  const [scheduledQueue, setScheduledQueue] = useState<Queue | null>(null);
+
+  const todayScheduleDay = useMemo(
+    () =>
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: AU_DASHBOARD_TIMEZONE,
+        weekday: "long",
+      })
+        .format(new Date(now))
+        .toLowerCase() as ScheduleDay,
+    [now],
+  );
 
   const myAnsweredCallsCount = useMemo(() => {
     if (!isAgentOverview || !session) return 0;
@@ -110,6 +137,91 @@ export function OverviewTab({
       clearCallDetailSession();
     }
   }, [setSelectedCall]);
+
+  useEffect(() => {
+    if (!isAgentOverview || !session?.userId) {
+      setTodayAssignedQueueId(null);
+      setScheduledQueue(null);
+      return;
+    }
+
+    let cancelled = false;
+    async function loadAssignedQueue() {
+      try {
+        let matchingAgentIds = agents
+          .filter((agent) => agent.userId === session.userId)
+          .map((agent) => agent.id);
+        if (matchingAgentIds.length === 0) {
+          const { data, error } = await supabase
+            .from("agents")
+            .select("id")
+            .eq("user_id", session.userId)
+            .limit(1);
+          if (!error) {
+            matchingAgentIds = (data ?? [])
+              .map((row) => String(row.id ?? "").trim())
+              .filter(Boolean);
+          }
+        }
+
+        const schedule = await fetchMyShiftSchedule({
+          userId: session.userId,
+          candidateIds: matchingAgentIds,
+        });
+        const todayShift = schedule?.[todayScheduleDay] ?? null;
+        const queueId = todayShift ? schedule?.dayQueueIds?.[todayScheduleDay] ?? null : null;
+        if (cancelled) return;
+
+        setTodayAssignedQueueId(queueId);
+        if (!queueId) {
+          setScheduledQueue(null);
+          return;
+        }
+
+        const existingQueue = queues.find((queue) => queue.id === queueId) ?? null;
+        if (existingQueue) {
+          setScheduledQueue(existingQueue);
+          return;
+        }
+
+        const { data: queueRows, error: queueError } = await supabase
+          .from("queues")
+          .select("*")
+          .eq("id", queueId)
+          .limit(1);
+        const row = !queueError ? queueRows?.[0] : null;
+        setScheduledQueue(
+          row
+            ? {
+                id: row.id,
+                tenantId: row.tenant_id,
+                name: row.name,
+                type: row.type,
+                color: row.color,
+                icon: row.icon,
+                activeCalls: row.active_calls,
+                waitingCalls: row.waiting_calls,
+                availableAgents: row.available_agents,
+                totalAgents: row.total_agents,
+                avgWaitSeconds: row.avg_wait_seconds,
+                slaPercent: row.sla_percent,
+              }
+            : null,
+        );
+      } catch (err) {
+        console.warn("Failed to load agent shift queue for overview", err);
+        if (!cancelled) {
+          setTodayAssignedQueueId(null);
+          setScheduledQueue(null);
+        }
+      }
+    }
+
+    void loadAssignedQueue();
+    return () => {
+      cancelled = true;
+    };
+  }, [agents, isAgentOverview, queues, session?.userId, todayScheduleDay]);
 
   useEffect(() => {
     if (!selectedCall) return;
@@ -335,9 +447,17 @@ export function OverviewTab({
   ]);
 
   const visibleQueues = useMemo(
-    () =>
-      queues
+    () => {
+      const overviewQueues =
+        scheduledQueue && !queues.some((queue) => queue.id === scheduledQueue.id)
+          ? [scheduledQueue, ...queues]
+          : queues;
+
+      return overviewQueues
         .filter((q) => {
+          const isTodayAssignedQueue = isAgentOverview && todayAssignedQueueId === q.id;
+          if (isAgentOverview) return todayAssignedQueueId ? isTodayAssignedQueue : false;
+
           const isAllowed =
             permissions.allowedQueueIds.length === 0 ||
             permissions.allowedQueueIds.includes(q.id);
@@ -346,9 +466,15 @@ export function OverviewTab({
           if (!isBlueQueue(q)) return true;
 
           const detail = queueCallDetails.get(q.id);
-          return Boolean(detail) || q.activeCalls > 0 || q.waitingCalls > 0;
+          return isTodayAssignedQueue || Boolean(detail) || q.activeCalls > 0 || q.waitingCalls > 0;
         })
         .sort((a, b) => {
+          if (todayAssignedQueueId) {
+            const aAssigned = a.id === todayAssignedQueueId;
+            const bAssigned = b.id === todayAssignedQueueId;
+            if (aAssigned !== bAssigned) return aAssigned ? -1 : 1;
+          }
+
           const aPri =
             Boolean(queueCallDetails.get(a.id)?.isIncoming) ||
             Boolean(queueCallDetails.get(a.id)?.showEndedCallerRecall);
@@ -361,8 +487,16 @@ export function OverviewTab({
           if (waitDelta !== 0) return waitDelta;
 
           return b.waitingCalls - a.waitingCalls;
-        }),
-    [queues, permissions.allowedQueueIds, queueCallDetails],
+        });
+    },
+    [
+      queues,
+      scheduledQueue,
+      isAgentOverview,
+      todayAssignedQueueId,
+      permissions.allowedQueueIds,
+      queueCallDetails,
+    ],
   );
 
   if (!summary) return <LoadingSkeleton />;

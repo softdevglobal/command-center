@@ -246,6 +246,19 @@ export interface AgentShiftSchedule {
   agentId: string;
   /** Supabase auth user id when the API includes it for agent-scoped reads. */
   userId?: string | null;
+  /** Queue assigned for each scheduled day. Null/empty means no queue assigned. */
+  dayQueueIds?: Partial<
+    Record<
+      | "monday"
+      | "tuesday"
+      | "wednesday"
+      | "thursday"
+      | "friday"
+      | "saturday"
+      | "sunday",
+      string | null
+    >
+  >;
   monday: string | null;
   tuesday: string | null;
   wednesday: string | null;
