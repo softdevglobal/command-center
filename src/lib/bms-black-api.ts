@@ -255,7 +255,7 @@ async function bmsBlackRequest<T>(
   if (res.status === 403) {
     const detail = await readErrorDetail(res);
     if (isFirebaseTokenError(detail)) {
-      logout();
+      logout({ reason: 'session-expired' });
     }
     throw new BmsBlackApiError(res.status, detail);
   }

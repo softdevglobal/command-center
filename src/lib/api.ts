@@ -44,6 +44,14 @@ export const AUTH_STORAGE_KEYS = {
 } as const;
 
 export const AUTH_LOGOUT_EVENT = 'command-centre-auth:logout';
+export const AUTH_SESSION_EXPIRED_STORAGE_KEY = 'command-centre-auth:session-expired';
+export const AUTH_SESSION_EXPIRED_MESSAGE = 'Your auth session expired. Please logout and login.';
+
+export type AuthLogoutReason = 'manual' | 'session-expired';
+export type AuthLogoutEventDetail = {
+  reason: AuthLogoutReason;
+  redirect: boolean;
+};
 
 type ApiErrorBody = {
   error?: string;
@@ -151,6 +159,30 @@ export function clearAuthStorage(): void {
   void supabase.auth.signOut();
 }
 
+function setSessionExpiredNotice(shouldShow: boolean): void {
+  try {
+    if (shouldShow) {
+      sessionStorage.setItem(AUTH_SESSION_EXPIRED_STORAGE_KEY, '1');
+    } else {
+      sessionStorage.removeItem(AUTH_SESSION_EXPIRED_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures; the logout still needs to continue.
+  }
+}
+
+export function consumeSessionExpiredNotice(): boolean {
+  try {
+    const shouldShow = sessionStorage.getItem(AUTH_SESSION_EXPIRED_STORAGE_KEY) === '1';
+    if (shouldShow) {
+      sessionStorage.removeItem(AUTH_SESSION_EXPIRED_STORAGE_KEY);
+    }
+    return shouldShow;
+  } catch {
+    return false;
+  }
+}
+
 export function authHeaders(): HeadersInit {
   const token = getAccessToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -194,11 +226,21 @@ export async function getMe(): Promise<MeResponse> {
   return (await res.json()) as MeResponse;
 }
 
-export function logout(options: { redirect?: boolean } = {}): void {
-  clearAuthStorage();
-  window.dispatchEvent(new Event(AUTH_LOGOUT_EVENT));
+export function logout(
+  options: { redirect?: boolean; reason?: AuthLogoutReason } = {},
+): void {
+  const reason = options.reason ?? 'manual';
+  const shouldRedirect = options.redirect !== false && window.location.pathname !== '/login';
 
-  if (options.redirect !== false && window.location.pathname !== '/login') {
+  setSessionExpiredNotice(reason === 'session-expired');
+  clearAuthStorage();
+  window.dispatchEvent(
+    new CustomEvent<AuthLogoutEventDetail>(AUTH_LOGOUT_EVENT, {
+      detail: { reason, redirect: shouldRedirect },
+    }),
+  );
+
+  if (shouldRedirect) {
     window.location.assign('/login');
   }
 }
@@ -229,7 +271,7 @@ export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}
     }
 
     if (res.status === 401 && logoutOnUnauthorized) {
-      logout();
+      logout({ reason: 'session-expired' });
     }
   }
   return res;
