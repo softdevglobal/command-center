@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FirebaseAuthProvider } from "@/integrations/firebase/FirebaseAuthProvider";
 import { AuthProvider } from "@/context/AuthContext";
+import { AuthSessionExpiredNotice } from "@/components/AuthSessionExpiredNotice";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import Index from "./pages/Index.tsx";
 import LoginPage from "./pages/LoginPage.tsx";
@@ -29,6 +30,7 @@ const App = () => (
         <BrowserRouter>
           <AuthProvider>
             <Toaster />
+            <AuthSessionExpiredNotice />
             <Sonner />
             <Routes>
               <Route path="/login" element={<LoginPage />} />

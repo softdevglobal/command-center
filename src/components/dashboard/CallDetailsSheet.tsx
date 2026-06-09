@@ -82,6 +82,7 @@ export interface CallDetailSnapshot {
 
 // ?? SessionStorage persistence for call detail across page navigation ??
 const CALL_DETAIL_STORAGE_KEY = 'cc_active_call_detail';
+const BLUE_INSPECTION_REQUEST_PATH = "/trade";
 
 export function saveCallDetailToSession(detail: CallDetailSnapshot): void {
   try {
@@ -539,6 +540,26 @@ export function CallDetailsSheet({
     (activeDetail.mappingWorkshopName || activeDetail.workshopName || "Unknown business") +
     (activeDetail.branchName ? ` - ${activeDetail.branchName}` : "");
 
+  function handleCreateBlueInspectionRequest() {
+    saveCallDetailToSession(activeDetail);
+    navigate(BLUE_INSPECTION_REQUEST_PATH, {
+      state: {
+        source: "blue-call-inspection-request",
+        callId: activeDetail.id,
+        customerName: resolvedCustomerName,
+        callerNumber: activeDetail.customerPhone,
+        businessName,
+        did: activeDetail.did || activeDetail.didLabel,
+        didLabel: activeDetail.didLabel,
+        queueId: activeDetail.queueId,
+        queueName: activeDetail.queueName,
+        tenantId: activeDetail.tenantId,
+        agentUserId: session?.userId ?? null,
+        agentName: session?.displayName ?? null,
+      },
+    });
+  }
+
   async function handleOpenWorkshopChat() {
     const ownerUid = activeDetail.ownerId.trim();
     if (!ownerUid || workshopChatLoading) return;
@@ -813,6 +834,29 @@ export function CallDetailsSheet({
 
               {isBlueCall ? (
                 <>
+                  <Card className="border-blue-200 bg-blue-50/70 shadow-sm ring-1 ring-blue-100">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="flex items-center gap-2 text-base text-blue-950">
+                        <Wrench className="h-4 w-4 text-blue-600" />
+                        Inspection request
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4 pt-0">
+                      <p className="text-sm text-blue-900/80">
+                        Start an inspection request for this Blue caller in Trade. The request API
+                        will be connected later.
+                      </p>
+                      <Button
+                        type="button"
+                        className="bg-blue-600 text-white hover:bg-blue-700"
+                        onClick={handleCreateBlueInspectionRequest}
+                      >
+                        <Wrench className="h-4 w-4" />
+                        Create inspection request
+                      </Button>
+                    </CardContent>
+                  </Card>
+
                   <Card className="border-blue-200 bg-white shadow-sm ring-1 ring-blue-100">
                     <CardHeader className="pb-3">
                       <CardTitle className="flex items-center gap-2 text-base text-blue-950">
@@ -860,8 +904,8 @@ export function CallDetailsSheet({
                   </Card>
 
                   <div className="rounded-2xl border border-dashed border-blue-200 bg-blue-50/60 px-4 py-3 text-sm text-blue-900">
-                    This Blue queue view is notes-only. Booking commands and
-                    booking history are hidden for this queue.
+                    Booking commands and booking history are hidden for this Blue queue. Use the
+                    inspection request action to continue in Trade.
                   </div>
                 </>
               ) : (
