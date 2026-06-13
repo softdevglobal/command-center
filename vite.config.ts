@@ -15,10 +15,21 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: false,
     },
-    /** Proxy local `/api/*` development calls to the Command Center backend. */
+    /**
+     * Proxy `/api/*` dev calls to the Command Center backend.
+     * Order matters: more specific prefixes first.
+     * Routes that only exist locally (not yet deployed to EC2) go to
+     * localhost:5050; everything else goes to the deployed backend.
+     * Once a route is deployed, remove its localhost entry.
+     */
     proxy: {
-      "/api": {
+      "/api/bms-black/bookings/by-phone": {
         target: "http://localhost:5050",
+        changeOrigin: true,
+        secure: false,
+      },
+      "/api": {
+        target: "http://13.236.183.142:5050",
         changeOrigin: true,
         secure: false,
       },

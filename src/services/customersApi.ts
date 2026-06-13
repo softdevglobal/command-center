@@ -1,12 +1,5 @@
-import { db } from "@/lib/firebase";
-import {
-  collection,
-  query,
-  where,
-  getDocs,
-  type DocumentData,
-} from "firebase/firestore";
-import { buildPhoneLookupVariants } from "./dashboardApi";
+import { apiFetch } from "@/lib/api";
+import { BMS_BLACK_API_URL, bmsBlackHeaders } from "./bmsBlackApi";
 import type {
   CallerContext,
   CustomerRecord,
@@ -14,25 +7,28 @@ import type {
   ServiceRecord,
 } from "./types";
 
-// ─── Main: Fetch Caller Context from Firebase ────────────────────────────────
+// ─── Main: Fetch Caller Context via backend bookings-by-phone API ────────────
+
+type BookingDocData = Record<string, any>;
 
 /**
- * Look up a customer in Firebase Firestore by owner UID and phone number.
+ * Look up a customer by owner UID and phone number via the backend
+ * `/bms-black/bookings/by-phone` endpoint (which queries Firestore with the
+ * Admin SDK — no client-side Firebase session required).
  *
  * Strategy:
- * 1. Query the root `bookings` collection by phone (all format variants).
- * 2. Filter results by ownerUid client-side (avoids composite Firestore index).
- * 3. Derive customer info, vehicles, and service history directly from those
+ * 1. Fetch bookings matching the phone number, scoped to the ownerUid.
+ * 2. Derive customer info, vehicles, and service history directly from those
  *    booking documents — no separate customers subcollection needed.
  */
 export async function fetchFirebaseCallerContext(
   ownerUid: string,
   callerNumber: string,
 ): Promise<CallerContext | null> {
-  const variants = buildPhoneLookupVariants(callerNumber);
-  if (!ownerUid || variants.length === 0) return null;
+  const phone = String(callerNumber ?? "").trim();
+  if (!ownerUid || !phone) return null;
 
-  const allBookings = await fetchBookingsByPhone(ownerUid, variants);
+  const allBookings = await fetchBookingsByPhoneApi(phone, ownerUid);
   if (allBookings.length === 0) return null;
 
   // Sort descending by date — most recent booking first
@@ -57,56 +53,57 @@ export async function fetchFirebaseCallerContext(
   return { customer, vehicles, services };
 }
 
-// ─── Internal: fetch all bookings for owner+phone ────────────────────────────
+// ─── Internal: fetch bookings for a phone via the backend API ────────────────
 
 interface RawBooking {
   id: string;
-  data: DocumentData;
+  data: BookingDocData;
 }
 
 /**
- * Queries the root `bookings` collection for documents where a phone field
- * matches any of the given variants. Results are deduplicated and filtered
- * client-side by ownerUid to avoid composite index requirements.
+ * Calls `GET /bms-black/bookings/by-phone?phone=...[&ownerUid=...]`.
+ * The backend builds the phone format variants, queries the Firestore
+ * `bookings` collection with the Admin SDK, and (when ownerUid is given)
+ * filters results to that workshop.
  */
-async function fetchBookingsByPhone(
-  ownerUid: string,
-  variants: string[],
+async function fetchBookingsByPhoneApi(
+  callerNumber: string,
+  ownerUid?: string | null,
 ): Promise<RawBooking[]> {
-  const bookingsRef = collection(db, "bookings");
-  const safeVariants = variants.slice(0, 30); // Firestore 'in' max = 30
+  const phone = String(callerNumber ?? "").trim();
+  if (!phone) return [];
 
-  const results = new Map<string, RawBooking>(); // keyed by doc ID to deduplicate
+  const params = new URLSearchParams({ phone });
+  const owner = ownerUid?.trim();
+  if (owner) params.set("ownerUid", owner);
 
-  for (const field of ["clientPhone", "customerPhone", "phone", "contactNumber"]) {
-    try {
-      const q = query(bookingsRef, where(field, "in", safeVariants));
-      const snap = await getDocs(q);
-      if (snap.empty) continue;
+  try {
+    // Caller lookup is a non-critical display feature — never log the user
+    // out if this request fails (logoutOnSessionExpired: false).
+    const res = await apiFetch(`${BMS_BLACK_API_URL}/bookings/by-phone?${params.toString()}`, {
+      headers: bmsBlackHeaders(),
+      logoutOnSessionExpired: false,
+    });
+    if (!res.ok) return [];
 
-      for (const doc of snap.docs) {
-        const data = doc.data();
-        // Client-side ownerUid filter
-        const docOwner = String(
-          data.ownerUid ?? data.tenantId ?? data.owner_uid ?? "",
-        );
-        if (docOwner === ownerUid) {
-          results.set(doc.id, { id: doc.id, data });
-        }
-      }
-    } catch {
-      // Field doesn't exist or has no single-field index — skip silently
-    }
+    const json = (await res.json()) as {
+      bookings?: Array<{ id?: unknown } & BookingDocData>;
+    };
+    if (!Array.isArray(json.bookings)) return [];
+
+    return json.bookings
+      .filter((b) => b && b.id != null)
+      .map(({ id, ...data }) => ({ id: String(id), data }));
+  } catch {
+    return [];
   }
-
-  return Array.from(results.values());
 }
 
 // ─── Derive customer info from booking ───────────────────────────────────────
 
 function mapBookingToCustomer(
   bookingDocId: string,
-  data: DocumentData,
+  data: BookingDocData,
   ownerUid: string,
 ): CustomerRecord {
   const phone = String(
@@ -180,7 +177,7 @@ function deriveVehiclesFromBookings(
 
 function mapBookingToServiceRecord(
   docId: string,
-  data: DocumentData,
+  data: BookingDocData,
   vehicles: VehicleRecord[],
 ): ServiceRecord {
   const rawRego = String(
@@ -224,34 +221,24 @@ function mapBookingToServiceRecord(
 // ─── Lightweight name-only lookup (for batch/table use) ──────────────────────
 
 /**
- * Look up just the customer name from Firebase bookings by owner UID and phone.
- * Much cheaper than fetchFirebaseCallerContext — skips vehicles & service history.
+ * Look up just the customer name from bookings by phone number.
+ * Much cheaper to consume than fetchFirebaseCallerContext — skips vehicles &
+ * service history.
+ *
+ * Queries by phone alone (no ownerUid filter): the ownerUid passed from
+ * CallsTab is typically a Supabase tenant ID (e.g. "t-xxx") which doesn't
+ * match the Firebase document's ownerUid field, so filtering by it would
+ * return zero results. The phone number is sufficient for display names.
  */
 export async function fetchCallerNameByPhone(
-  _ownerUid: string,
   callerNumber: string,
 ): Promise<string | null> {
-  const variants = buildPhoneLookupVariants(callerNumber);
-  if (variants.length === 0) {
-    // console.warn("[CallerName] Skipped — no phone variants", { callerNumber });
-    return null;
-  }
+  const phone = String(callerNumber ?? "").trim();
+  if (!phone) return null;
 
-  // console.log("[CallerName] Looking up", {
-  //   callerNumber,
-  //   variantCount: variants.length,
-  // });
   try {
-    // For name-only lookups we query by phone number alone (no ownerUid filter).
-    // The ownerUid passed from CallsTab is typically a Supabase tenant ID
-    // (e.g. "t-xxx") which doesn't match the Firebase document's ownerUid field,
-    // so filtering by it would return zero results. The phone number is sufficient
-    // to identify the customer for display-name purposes.
-    const bookings = await fetchBookingsByPhoneOnly(variants);
-    if (bookings.length === 0) {
-      // console.log("[CallerName] Result:", { callerNumber, name: "(no bookings)" });
-      return null;
-    }
+    const bookings = await fetchBookingsByPhoneApi(phone);
+    if (bookings.length === 0) return null;
 
     // Sort descending by date — most recent booking first
     bookings.sort((a, b) => {
@@ -269,58 +256,13 @@ export async function fetchCallerNameByPhone(
       return n.length > 0;
     });
 
-    if (!bookingWithName) {
-      // console.log("[CallerName] Result:", {
-      //   callerNumber,
-      //   name: "(not found)",
-      // });
-      return null;
-    }
+    if (!bookingWithName) return null;
 
     const data = bookingWithName.data;
-    const name = String(
+    return String(
       data.client ?? data.clientName ?? data.customerName ?? data.name ?? "",
     ).trim();
-
-    // console.log("[CallerName] Result:", {
-    //   callerNumber,
-    //   name,
-    // });
-    return name;
   } catch {
-    // console.error("[CallerName] Error:", err);
     return null;
   }
-}
-
-// ─── Phone-only booking lookup (no ownerUid filter) ──────────────────────────
-
-/**
- * Queries the root `bookings` collection for documents where a phone field
- * matches any of the given variants. No ownerUid filtering — used for
- * lightweight name resolution where the phone number alone is sufficient.
- */
-async function fetchBookingsByPhoneOnly(
-  variants: string[],
-): Promise<RawBooking[]> {
-  const bookingsRef = collection(db, "bookings");
-  const safeVariants = variants.slice(0, 30); // Firestore 'in' max = 30
-
-  const results = new Map<string, RawBooking>(); // keyed by doc ID to deduplicate
-
-  for (const field of ["clientPhone", "customerPhone", "phone", "contactNumber"]) {
-    try {
-      const q = query(bookingsRef, where(field, "in", safeVariants));
-      const snap = await getDocs(q);
-      if (snap.empty) continue;
-
-      for (const doc of snap.docs) {
-        results.set(doc.id, { id: doc.id, data: doc.data() });
-      }
-    } catch {
-      // Field doesn't exist or has no single-field index — skip silently
-    }
-  }
-
-  return Array.from(results.values());
 }

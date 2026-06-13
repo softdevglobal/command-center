@@ -153,7 +153,7 @@ function useCallerNames(calls: Call[], tenants: Tenant[]) {
     const entries = Array.from(lookups.entries());
     Promise.allSettled(
       entries.map(([phone, ownerUid]) =>
-        fetchCallerNameByPhone(ownerUid, phone).then((name) => ({
+        fetchCallerNameByPhone(phone).then((name) => ({
           phone,
           ownerUid,
           name,

@@ -548,12 +548,14 @@ export function CallDetailsSheet({
         callId: activeDetail.id,
         customerName: resolvedCustomerName,
         callerNumber: activeDetail.customerPhone,
+        businessId: activeDetail.ownerId || "",
         businessName,
         did: activeDetail.did || activeDetail.didLabel,
         didLabel: activeDetail.didLabel,
         queueId: activeDetail.queueId,
         queueName: activeDetail.queueName,
         tenantId: activeDetail.tenantId,
+        ownerId: activeDetail.ownerId || "",
         agentUserId: session?.userId ?? null,
         agentName: session?.displayName ?? null,
       },
@@ -843,16 +845,22 @@ export function CallDetailsSheet({
                     </CardHeader>
                     <CardContent className="space-y-4 pt-0">
                       <p className="text-sm text-blue-900/80">
-                        Start an inspection request for this Blue caller in Trade. The request API
-                        will be connected later.
+                        Open Trade to load all inspection requests for the mapped Blue
+                        business. New requests are created from the inspection requests page.
                       </p>
+                      {!activeDetail.ownerId && !mappingLoading ? (
+                        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                          No Blue business id is mapped to this DID yet.
+                        </div>
+                      ) : null}
                       <Button
                         type="button"
                         className="bg-blue-600 text-white hover:bg-blue-700"
                         onClick={handleCreateBlueInspectionRequest}
+                        disabled={mappingLoading || !activeDetail.ownerId}
                       >
                         <Wrench className="h-4 w-4" />
-                        Create inspection request
+                        View inspection requests
                       </Button>
                     </CardContent>
                   </Card>

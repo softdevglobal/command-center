@@ -62,6 +62,7 @@ type ApiErrorBody = {
 
 type ApiFetchInit = RequestInit & {
   logoutOnUnauthorized?: boolean;
+  logoutOnSessionExpired?: boolean;
 };
 
 const SESSION_EXPIRED_STATUS_CODES = new Set([401, 403, 404]);
@@ -249,7 +250,11 @@ export function logout(
 }
 
 export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}): Promise<Response> {
-  const { logoutOnUnauthorized = false, ...fetchInit } = init;
+  const {
+    logoutOnUnauthorized = false,
+    logoutOnSessionExpired = true,
+    ...fetchInit
+  } = init;
   const headers = new Headers(init.headers);
   const token = getAccessToken();
   const hadAuthToken = Boolean(token);
@@ -276,8 +281,9 @@ export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}
   }
 
   const shouldLogoutForStatus =
-    SESSION_EXPIRED_STATUS_CODES.has(res.status) ||
-    (logoutOnUnauthorized && res.status === 401);
+    logoutOnSessionExpired &&
+    (SESSION_EXPIRED_STATUS_CODES.has(res.status) ||
+      (logoutOnUnauthorized && res.status === 401));
 
   if (hadAuthToken && shouldLogoutForStatus) {
     logout({ reason: 'session-expired' });
