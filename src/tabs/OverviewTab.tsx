@@ -37,6 +37,7 @@ import { NotificationsCard } from "@/tabs/NotificationsCard";
 import { ResultBadge } from "@/components/dashboard/ResultBadge";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { fetchCallerNameByPhone } from "@/services/customersApi";
 import {
   Table,
   TableBody,
@@ -84,6 +85,8 @@ export function OverviewTab({
     incomingCallsForQueueCards ?? incomingCalls ?? [];
   const { selectedCall, setSelectedCall } = useCallNotification();
   const restoredFromSession = useRef(false);
+  const callerNameCacheRef = useRef<Map<string, string | null>>(new Map());
+  const [resolvedCallerNames, setResolvedCallerNames] = useState<Map<string, string | null>>(new Map());
 
   const myAnsweredCallsCount = useMemo(() => {
     if (!isAgentOverview || !session) return 0;
@@ -100,6 +103,52 @@ export function OverviewTab({
     () => agents.filter((a) => a.status === "ringing"),
     [agents],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    const lookups = new Map<string, string>();
+
+    const queueIncomingMissingNames = queueCardIncoming.filter(
+      (call) => call.callerNumber && isPlaceholderCallerName(call.callerName),
+    );
+    for (const call of queueIncomingMissingNames) {
+      const key = normalizeNumber(call.callerNumber);
+      if (key && !callerNameCacheRef.current.has(key)) {
+        lookups.set(key, call.callerNumber);
+      }
+    }
+
+    for (const agent of ringingAgents) {
+      const phone = agent.currentCaller;
+      const key = normalizeNumber(phone);
+      if (key && !callerNameCacheRef.current.has(key)) {
+        lookups.set(key, phone ?? "");
+      }
+    }
+
+    if (lookups.size === 0) {
+      setResolvedCallerNames(new Map(callerNameCacheRef.current));
+      return;
+    }
+
+    Promise.allSettled(
+      [...lookups.entries()].map(([key, phone]) =>
+        fetchCallerNameByPhone("", phone).then((name) => ({ key, name })),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          callerNameCacheRef.current.set(result.value.key, result.value.name);
+        }
+      }
+      setResolvedCallerNames(new Map(callerNameCacheRef.current));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [queueCardIncoming, ringingAgents]);
 
   // Restore call detail saved before navigating away (Book Now / Booking Details)
   useEffect(() => {
@@ -137,6 +186,13 @@ export function OverviewTab({
   ]);
 
   const queueCallDetails = useMemo(() => {
+    const resolvedNameFor = (phone: string | null | undefined, fallback?: string | null) => {
+      const existing = fallback?.trim();
+      if (existing && !isPlaceholderCallerName(existing)) return existing;
+      const key = normalizeNumber(phone);
+      return key ? resolvedCallerNames.get(key) ?? null : null;
+    };
+
     const map = new Map<
       string,
       {
@@ -185,11 +241,13 @@ export function OverviewTab({
 
       const buildRow = (c: typeof unansweredIncoming[number]) => {
         const showAsEnded = Boolean(queueIncomingLingerEndedAt?.has(c.id));
+        const resolvedName = resolvedNameFor(c.callerNumber, c.callerName);
+        const enrichedCall = resolvedName ? { ...c, callerName: resolvedName } : c;
         return {
           number: c.callerNumber,
-          name: c.callerName || null,
+          name: resolvedName,
           waitingSince: c.waitingSince,
-          detail: buildIncomingCallSnapshot(c, now, { showAsEnded }),
+          detail: buildIncomingCallSnapshot(enrichedCall, now, { showAsEnded }),
           endedAt: queueIncomingLingerEndedAt?.get(c.id) ?? null,
         };
       };
@@ -203,7 +261,12 @@ export function OverviewTab({
           ...lingerUnansweredIncoming.map(buildRow),
         ];
         map.set(queue.id, {
-          detail: buildIncomingCallSnapshot(head, now),
+          detail: buildIncomingCallSnapshot(
+            resolvedNameFor(head.callerNumber, head.callerName)
+              ? { ...head, callerName: resolvedNameFor(head.callerNumber, head.callerName) }
+              : head,
+            now,
+          ),
           hint:
             activeUnansweredIncoming.length > 1
               ? "Click a caller below to see their details."
@@ -244,7 +307,7 @@ export function OverviewTab({
           isLive: false,
           showEndedCallerRecall: false,
           incomingCallers: cPhone
-            ? [{ number: cPhone, name: null, waitingSince: null, detail }]
+            ? [{ number: cPhone, name: resolvedNameFor(cPhone), waitingSince: null, detail }]
             : [],
         });
         continue;
@@ -269,7 +332,8 @@ export function OverviewTab({
           incomingMatch?.callerNumber ||
           "Unknown";
         const cName =
-          incomingMatch?.callerName || `Agent: ${liveAgentForQueue.name}`;
+          resolvedNameFor(incomingMatch?.callerNumber, incomingMatch?.callerName) ||
+          `Agent: ${liveAgentForQueue.name}`;
 
         map.set(queue.id, {
           detail,
@@ -331,6 +395,7 @@ export function OverviewTab({
     ringingAgents,
     now,
     queues,
+    resolvedCallerNames,
     tenants,
   ]);
 
@@ -658,6 +723,16 @@ function buildLiveOrIncomingDetail(
 
 function normalizeNumber(phone: string | null | undefined): string {
   return (phone ?? "").replace(/\D/g, "");
+}
+
+function isPlaceholderCallerName(name: string | null | undefined): boolean {
+  const normalized = String(name ?? "").trim().toLowerCase();
+  return (
+    !normalized ||
+    normalized === "unknown" ||
+    normalized === "unknown caller" ||
+    normalized === "anonymous"
+  );
 }
 
 function isBlueQueue(queue: Pick<Queue, "id" | "name" | "type">): boolean {

@@ -310,8 +310,15 @@ export function QueueSummaryCard({
                         {caller.name || 'Unknown Caller'}
                       </div>
                       <div className="mt-0.5 flex items-center justify-between gap-2">
-                        <div className={`truncate font-mono text-[11px] font-semibold ${subTextColor}`}>
-                          {formatPhone(caller.number)}
+                        <div className="min-w-0">
+                          <div className={`truncate font-mono text-[11px] font-semibold ${subTextColor}`}>
+                            {formatPhone(caller.number)}
+                          </div>
+                          {caller.waitingSince && (
+                            <div className={`mt-0.5 truncate font-mono text-[10px] ${subTextColor}`}>
+                              Came in {formatIncomingTime(caller.waitingSince)}
+                            </div>
+                          )}
                         </div>
                         <div className={`shrink-0 rounded-md bg-white/70 px-1.5 py-0.5 font-mono text-[10px] font-bold ${badgeStyle} ring-1`}>
                           {isLiveCard ? (
@@ -396,4 +403,14 @@ function formatPhoneDurationLabel(totalSeconds: number): string {
   const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
   const ss = String(seconds % 60).padStart(2, "0");
   return `${mm}:${ss}`;
+}
+
+function formatIncomingTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString('en-AU', {
+    timeZone: 'Australia/Melbourne',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
 }
