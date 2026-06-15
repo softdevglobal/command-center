@@ -35,6 +35,13 @@ import {
 import { getBookings, resolveBmsOwnerUidForTenant } from "./bookingsApi";
 import { logSystemActivity } from "./auditLogApi";
 import type { UserSession } from "./types";
+import {
+  fetchCdrList as fetchYeastarCdrList,
+  fetchRecordingList as fetchYeastarRecordingList,
+  isYeastarConfigured,
+  type YeastarCdr,
+  type YeastarRecordingFile,
+} from "./yeastarService";
 
 export { ONBOARDING_STAGES };
 
@@ -881,6 +888,7 @@ export async function createSuperAdminAgent(opts: {
 
 type CallsApiRow = {
   id: string;
+  pbx_call_id?: string | null;
   tenant_id: string;
   queue_id: string;
   agent_id: string | null;
@@ -888,6 +896,7 @@ type CallsApiRow = {
   caller_number: string;
   caller_name: string | null;
   dialed_number: string | null;
+  call_to_extension?: string | null;
   start_time: string;
   answer_time: string | null;
   end_time: string | null;
@@ -941,6 +950,454 @@ function pickRecordNumber(
   return fallback;
 }
 
+const YEASTAR_CDR_TIMEZONE = "Australia/Melbourne";
+
+const yeastarCdrDateTimeFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: YEASTAR_CDR_TIMEZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+  hourCycle: "h23",
+});
+
+type CdrAgentLookupRow = {
+  id: string;
+  tenant_id: string;
+  queue_ids: string[];
+  extension: string;
+  name?: string | null;
+};
+
+type YeastarCdrMappingContext = {
+  didByDigits: Map<string, DIDMapping>;
+  agentsByExtension: Map<string, CdrAgentLookupRow>;
+};
+
+function dateTimePartsInMelbourne(ms: number): Record<string, string> {
+  return Object.fromEntries(
+    yeastarCdrDateTimeFormatter
+      .formatToParts(new Date(ms))
+      .filter((p) => p.type !== "literal")
+      .map((p) => [p.type, p.value]),
+  );
+}
+
+function melbourneDateTimeKey(ms: number): string {
+  const p = dateTimePartsInMelbourne(ms);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`;
+}
+
+function wallDateTimeKey(y: number, mo: number, d: number, h: number, mi: number, s: number): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${y}-${pad(mo)}-${pad(d)} ${pad(h)}:${pad(mi)}:${pad(s)}`;
+}
+
+function formatYeastarCdrSearchTime(iso?: string): string | undefined {
+  if (!iso) return undefined;
+  const ms = new Date(iso).getTime();
+  if (!Number.isFinite(ms)) return undefined;
+  const p = dateTimePartsInMelbourne(ms);
+  return `${p.year}/${p.month}/${p.day} ${p.hour}:${p.minute}:${p.second}`;
+}
+
+function parseYeastarCdrDateToIso(row: Record<string, unknown>): string {
+  const tsRaw = row.timestamp;
+  const ts = typeof tsRaw === "number" ? tsRaw : Number(tsRaw);
+  if (Number.isFinite(ts) && ts > 0) {
+    const ms = ts > 1_000_000_000_000 ? ts : ts * 1000;
+    return new Date(ms).toISOString();
+  }
+
+  const raw =
+    pickRecordString(row, ["time", "timestart", "time_start", "start_time", "started_at"]) ?? "";
+  const trimmed = raw.trim();
+  const m = /^(\d{1,4})[-/](\d{1,2})[-/](\d{1,4})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*([AP]M))?/i.exec(trimmed);
+  if (!m) {
+    const fallback = new Date(raw.replace(" ", "T"));
+    return Number.isFinite(fallback.getTime()) ? fallback.toISOString() : new Date(0).toISOString();
+  }
+
+  const [, aRaw, bRaw, cRaw, hh, min, secRaw, meridiemRaw] = m;
+  const a = Number(aRaw);
+  const b = Number(bRaw);
+  const c = Number(cRaw);
+  const isYearFirst = String(aRaw).length === 4;
+  const isYearLast = String(cRaw).length === 4;
+  const y = isYearFirst ? a : isYearLast ? c : a;
+  const mo = isYearFirst ? b : a > 12 ? b : b > 12 ? a : b;
+  const d = isYearFirst ? c : a > 12 ? a : b > 12 ? b : a;
+  let h = Number(hh);
+  const meridiem = meridiemRaw?.toUpperCase();
+  if (meridiem === "PM" && h < 12) h += 12;
+  if (meridiem === "AM" && h === 12) h = 0;
+  const mi = Number(min);
+  const s = Number(secRaw ?? 0);
+  const target = wallDateTimeKey(y, mo, d, h, mi, s);
+
+  let lo = Date.UTC(y, mo - 1, d, h, mi, s) - 36 * 3600000;
+  let hi = Date.UTC(y, mo - 1, d, h, mi, s) + 36 * 3600000;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (melbourneDateTimeKey(mid) < target) lo = mid + 1000;
+    else hi = mid;
+  }
+
+  return new Date(lo).toISOString();
+}
+
+function extractYeastarPartyNumber(raw: string): string {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  const angled = /<([^>]+)>/.exec(s);
+  if (angled?.[1]) return angled[1].trim().replace(/\s+/g, "");
+  return s.replace(/\s+/g, "");
+}
+
+function extensionLookupCandidates(raw: string): string[] {
+  const out: string[] = [];
+  const push = (value: string) => {
+    const v = value.trim();
+    if (v && !out.includes(v)) out.push(v);
+  };
+  push(raw);
+  push(extractYeastarPartyNumber(raw));
+  const digits = raw.replace(/\D/g, "");
+  if (digits) {
+    push(digits);
+    const stripped = digits.replace(/^0+/, "") || digits;
+    if (stripped !== digits) push(stripped);
+  }
+  return out;
+}
+
+function findAgentByPartyRaw(
+  agentsByExtension: Map<string, CdrAgentLookupRow>,
+  raw: string,
+): CdrAgentLookupRow | undefined {
+  for (const candidate of extensionLookupCandidates(raw)) {
+    const hit = agentsByExtension.get(candidate);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+function cleanRecordingPath(recording: string | null): string | null {
+  const value = recording?.trim();
+  if (!value) return null;
+  if (/^(?:n\/a|none|null|no|false|0)$/i.test(value)) return null;
+  return value;
+}
+
+function mapYeastarCdrStatus(status: string): CallResult {
+  switch (status.trim().toUpperCase()) {
+    case "ANSWERED":
+      return "answered";
+    case "BUSY":
+      return "abandoned";
+    case "VOICEMAIL":
+      return "voicemail";
+    case "NO ANSWER":
+    case "FAILED":
+    default:
+      return "missed";
+  }
+}
+
+function resolveYeastarCdrDirection(
+  row: Record<string, unknown>,
+  fromAgent?: CdrAgentLookupRow,
+  toAgent?: CdrAgentLookupRow,
+): "inbound" | "outbound" {
+  const explicit = pickRecordString(row, [
+    "call_type",
+    "calltype",
+    "callType",
+    "communication_type",
+    "cdr_type",
+    "direction",
+    "type",
+  ])?.toLowerCase();
+
+  if (explicit?.includes("outbound") || explicit?.includes("outgoing")) return "outbound";
+  if (explicit?.includes("inbound") || explicit?.includes("incoming")) return "inbound";
+  if (explicit?.includes("internal")) {
+    if (toAgent) return "inbound";
+    if (fromAgent) return "outbound";
+  }
+
+  return toAgent ? "inbound" : fromAgent ? "outbound" : "inbound";
+}
+
+function didLookupKeys(value: string | null | undefined): string[] {
+  const raw = String(value ?? "").trim();
+  if (!raw) return [];
+  const extracted = extractYeastarPartyNumber(raw);
+  const digits = raw.replace(/\D/g, "");
+  const extractedDigits = extracted.replace(/\D/g, "");
+  return [...new Set([raw, extracted, digits, extractedDigits].filter(Boolean))];
+}
+
+function findDidMappingForCdr(
+  row: Record<string, unknown>,
+  rawTo: string,
+  ctx: YeastarCdrMappingContext,
+): DIDMapping | undefined {
+  const candidates = [
+    pickNullableRecordString(row, ["did", "did_number", "didnumber", "didNumber", "did_num", "didnum"]),
+    rawTo,
+  ];
+
+  for (const candidate of candidates) {
+    for (const key of didLookupKeys(candidate)) {
+      const hit = ctx.didByDigits.get(key);
+      if (hit) return hit;
+    }
+  }
+  return undefined;
+}
+
+async function fetchYeastarCdrMappingContext(
+  tenantId?: string | null,
+): Promise<YeastarCdrMappingContext> {
+  const [didMappings, agentsRes] = await Promise.all([
+    fetchDIDMappings().catch(() => [] as DIDMapping[]),
+    (() => {
+      let q = dynamicSupabase
+        .from("agents")
+        .select("id, tenant_id, queue_ids, extension, name");
+      if (tenantId && tenantId !== "unknown") q = q.eq("tenant_id", tenantId);
+      return q;
+    })(),
+  ]);
+
+  const scopedMappings =
+    tenantId && tenantId !== "unknown"
+      ? didMappings.filter((m) => m.tenantId === tenantId)
+      : didMappings;
+
+  const didByDigits = new Map<string, DIDMapping>();
+  for (const mapping of scopedMappings) {
+    for (const key of didLookupKeys(mapping.did)) {
+      didByDigits.set(key, mapping);
+    }
+  }
+
+  const agentsByExtension = new Map<string, CdrAgentLookupRow>();
+  if (!agentsRes.error) {
+    for (const row of (agentsRes.data ?? []) as Record<string, unknown>[]) {
+      const agent: CdrAgentLookupRow = {
+        id: String(row.id ?? ""),
+        tenant_id: String(row.tenant_id ?? ""),
+        queue_ids: Array.isArray(row.queue_ids) ? row.queue_ids.map(String) : [],
+        extension: String(row.extension ?? ""),
+        name: row.name == null ? null : String(row.name),
+      };
+      if (!agent.id || !agent.extension) continue;
+      for (const candidate of extensionLookupCandidates(agent.extension)) {
+        agentsByExtension.set(candidate, agent);
+      }
+    }
+  }
+
+  return { didByDigits, agentsByExtension };
+}
+
+function normalizeYeastarCdrToCallsApiRow(
+  cdr: YeastarCdr,
+  ctx: YeastarCdrMappingContext,
+  tenantId?: string | null,
+): CallsApiRow | null {
+  const row = asPlainRecord(cdr);
+  const rawFrom = pickRecordString(row, ["call_from", "callfrom", "call_from_number", "from"]) ?? "";
+  const rawTo = pickRecordString(row, ["call_to", "callto", "call_to_number", "to"]) ?? "";
+  const fromAgent = findAgentByPartyRaw(ctx.agentsByExtension, rawFrom);
+  const toAgent = findAgentByPartyRaw(ctx.agentsByExtension, rawTo);
+  const direction = resolveYeastarCdrDirection(row, fromAgent, toAgent);
+  const agent = direction === "outbound" ? fromAgent : toAgent;
+  const didMapping = direction === "inbound" ? findDidMappingForCdr(row, rawTo, ctx) : undefined;
+  const resolvedTenantId =
+    direction === "outbound"
+      ? agent?.tenant_id
+      : didMapping?.tenantId ?? agent?.tenant_id;
+
+  if (tenantId && tenantId !== "unknown" && resolvedTenantId !== tenantId) return null;
+  if (tenantId && tenantId !== "unknown" && !resolvedTenantId) return null;
+
+  const customerRaw = direction === "inbound" ? rawFrom : rawTo;
+  const callerNumber = extractYeastarPartyNumber(customerRaw) || customerRaw.replace(/\s+/g, "");
+  if (!callerNumber) return null;
+
+  const pbxCallId =
+    pickRecordString(row, ["call_id", "callid", "uid", "new_id", "cdrid", "id"]) ??
+    `${parseYeastarCdrDateToIso(row)}-${callerNumber}-${rawTo}`;
+  const cleanPbxId = String(pbxCallId).trim();
+  const rawCallTo = rawTo || pickRecordString(row, ["call_to_name", "call_to_number"]) || null;
+  const startTime = parseYeastarCdrDateToIso(row);
+  const durationSeconds = pickRecordNumber(
+    row,
+    ["duration", "callduraction", "call_duration"],
+    0,
+  );
+  const talkSeconds = pickRecordNumber(row, ["talk_duration", "talkduraction"], 0);
+  const answerTime =
+    talkSeconds > 0 && durationSeconds >= talkSeconds
+      ? new Date(new Date(startTime).getTime() + (durationSeconds - talkSeconds) * 1000).toISOString()
+      : null;
+  const endTime =
+    durationSeconds > 0
+      ? new Date(new Date(startTime).getTime() + durationSeconds * 1000).toISOString()
+      : null;
+  const callerName =
+    direction === "inbound"
+      ? pickNullableRecordString(row, ["call_from_name", "caller_name"])
+      : pickNullableRecordString(row, ["call_to_name", "callee_name"]);
+  const recordingUrl = cleanRecordingPath(
+    pickNullableRecordString(row, [
+      "record_file",
+      "recording_file",
+      "recording",
+      "recording_path",
+      "file",
+      "file_path",
+    ]) ?? pickNullableRecordString(row, ["recording_id", "id"]),
+  );
+  const status = pickRecordString(row, ["status", "disposition", "result"]);
+
+  return {
+    id: cleanPbxId.startsWith("yeastar-") ? cleanPbxId : `yeastar-${cleanPbxId}`,
+    pbx_call_id: cleanPbxId,
+    tenant_id: resolvedTenantId ?? "unknown",
+    queue_id:
+      direction === "inbound"
+        ? didMapping?.queueId ?? agent?.queue_ids?.[0] ?? "unknown"
+        : agent?.queue_ids?.[0] ?? "unknown",
+    agent_id: agent?.id ?? null,
+    direction,
+    caller_number: callerNumber,
+    caller_name: callerName,
+    dialed_number:
+      direction === "inbound"
+        ? didMapping?.did ??
+          pickNullableRecordString(row, ["did", "did_number", "didnumber", "didNumber"]) ??
+          extractYeastarPartyNumber(rawTo) ??
+          null
+        : null,
+    call_to_extension: rawCallTo,
+    start_time: startTime,
+    answer_time: answerTime,
+    end_time: endTime,
+    duration_seconds: durationSeconds,
+    result: status ? mapYeastarCdrStatus(status) : recordingUrl ? "answered" : "missed",
+    recording_url: recordingUrl,
+    transcript_status: "none",
+    summary_status: "none",
+    agent_name: agent?.name ?? null,
+    queue_name: null,
+    tenant_name: null,
+  };
+}
+
+async function fetchYeastarCdrApiRows(
+  tenantId?: string | null,
+  limit: number = 200,
+  startDate?: string,
+  endDate?: string,
+): Promise<CallsApiRow[]> {
+  if (!isYeastarConfigured()) return [];
+
+  try {
+    const dateFrom = formatYeastarCdrSearchTime(startDate);
+    const dateTo = formatYeastarCdrSearchTime(endDate);
+
+    let cdrs: YeastarCdr[] = [];
+
+    // Prefer server-side date filtering via `cdr/search`. The PBX requires
+    // `start_time`/`end_time` to match its configured display format exactly and
+    // rejects any mismatch with `40002 PARAMETER ERROR`. Treat that (and an empty
+    // result) as "fall back to recent `cdr/list` and filter client-side", so the
+    // Calls tab still works regardless of the PBX's date format.
+    if (dateFrom || dateTo) {
+      try {
+        cdrs = await fetchYeastarCdrList({ dateFrom, dateTo, limit });
+      } catch {
+        cdrs = [];
+      }
+    }
+
+    if (cdrs.length === 0) {
+      cdrs = await fetchYeastarCdrList({ limit });
+    }
+
+    if (cdrs.length === 0) return [];
+
+    const ctx = await fetchYeastarCdrMappingContext(tenantId);
+    const startMs = startDate ? new Date(startDate).getTime() : null;
+    const endMs = endDate ? new Date(endDate).getTime() : null;
+
+    return cdrs
+      .map((cdr) => normalizeYeastarCdrToCallsApiRow(cdr, ctx, tenantId))
+      .filter((row): row is CallsApiRow => {
+        if (!row) return false;
+        const ms = new Date(row.start_time).getTime();
+        if (startMs != null && Number.isFinite(startMs) && ms < startMs) return false;
+        if (endMs != null && Number.isFinite(endMs) && ms > endMs) return false;
+        return true;
+      });
+  } catch (err) {
+    console.warn("[dashboardApi] Yeastar CDR endpoint fetch failed:", err);
+    return [];
+  }
+}
+
+async function fetchYeastarRecordingApiRows(
+  tenantId?: string | null,
+  limit: number = 200,
+  startDate?: string,
+  endDate?: string,
+): Promise<CallsApiRow[]> {
+  if (!isYeastarConfigured()) return [];
+
+  try {
+    const startMs = startDate ? new Date(startDate).getTime() : null;
+    const endMs = endDate ? new Date(endDate).getTime() : null;
+    const startUnix = startMs != null && Number.isFinite(startMs) ? Math.floor(startMs / 1000) : undefined;
+    const endUnix = endMs != null && Number.isFinite(endMs) ? Math.floor(endMs / 1000) : undefined;
+
+    let recordings: YeastarRecordingFile[] = [];
+    if (startUnix !== undefined || endUnix !== undefined) {
+      try {
+        recordings = await fetchYeastarRecordingList({ startUnix, endUnix, limit });
+      } catch {
+        recordings = [];
+      }
+    }
+
+    if (recordings.length === 0) {
+      recordings = await fetchYeastarRecordingList({ limit });
+    }
+
+    if (recordings.length === 0) return [];
+
+    const ctx = await fetchYeastarCdrMappingContext(tenantId);
+    return recordings
+      .map((recording) => normalizeYeastarCdrToCallsApiRow(recording, ctx, tenantId))
+      .filter((row): row is CallsApiRow => {
+        if (!row) return false;
+        const ms = new Date(row.start_time).getTime();
+        if (startMs != null && Number.isFinite(startMs) && ms < startMs) return false;
+        if (endMs != null && Number.isFinite(endMs) && ms > endMs) return false;
+        return true;
+      });
+  } catch (err) {
+    console.warn("[dashboardApi] Yeastar Recording endpoint fetch failed:", err);
+    return [];
+  }
+}
+
 function extractCallsApiRows(raw: unknown): unknown[] {
   if (Array.isArray(raw)) return raw;
   const body = asPlainRecord(raw);
@@ -955,6 +1412,7 @@ function normalizeCallsApiRow(raw: unknown): CallsApiRow {
   const row = asPlainRecord(raw);
   return {
     id: pickRecordString(row, ["id", "callId", "call_id"]) ?? "",
+    pbx_call_id: pickNullableRecordString(row, ["pbx_call_id", "pbxCallId", "call_id", "callId", "uid"]),
     tenant_id: pickRecordString(row, ["tenant_id", "tenantId"]) ?? "unknown",
     queue_id: pickRecordString(row, ["queue_id", "queueId"]) ?? "unknown",
     agent_id: pickNullableRecordString(row, ["agent_id", "agentId"]),
@@ -962,6 +1420,7 @@ function normalizeCallsApiRow(raw: unknown): CallsApiRow {
     caller_number: pickRecordString(row, ["caller_number", "callerNumber", "from"]) ?? "",
     caller_name: pickNullableRecordString(row, ["caller_name", "callerName", "customerName"]),
     dialed_number: pickNullableRecordString(row, ["dialed_number", "dialedNumber", "to", "did"]),
+    call_to_extension: pickNullableRecordString(row, ["call_to_extension", "callToExtension", "call_to", "callTo"]),
     start_time:
       pickRecordString(row, ["start_time", "startTime", "startedAt", "created_at", "createdAt"]) ??
       new Date(0).toISOString(),
@@ -1085,7 +1544,26 @@ export async function fetchCalls(
   startDate?: string,
   endDate?: string,
 ): Promise<Call[]> {
-  const rows = await fetchCallsApiRows(tenantId, limit, startDate, endDate);
+  let callsApiError: unknown = null;
+  let rows: CallsApiRow[] = [];
+
+  try {
+    rows = await fetchCallsApiRows(tenantId, limit, startDate, endDate);
+  } catch (err) {
+    callsApiError = err;
+  }
+
+  const [yeastarCdrRows, yeastarRecordingRows] = await Promise.all([
+    fetchYeastarCdrApiRows(tenantId, limit, startDate, endDate),
+    fetchYeastarRecordingApiRows(tenantId, limit, startDate, endDate),
+  ]);
+  rows = [...rows, ...yeastarCdrRows, ...yeastarRecordingRows]
+    .sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime())
+    .slice(0, Math.min(Math.max(limit, 1), 1000));
+
+  if (rows.length === 0 && callsApiError) {
+    throw callsApiError instanceof Error ? callsApiError : new Error(String(callsApiError));
+  }
   if (rows.length === 0) return [];
 
   const dispositionByLinkusId = await fetchSoftphoneDispositionAgentMap(tenantId, rows.map(r => r.id));
@@ -1133,7 +1611,7 @@ export async function fetchCalls(
   function bestRecordingUrlFromCluster(
     cluster: RawRow[],
     clusterDisp: DispositionAgent | undefined,
-  ): string | null {
+  ): RawRow | null {
     const recordingRow = cluster.reduce<RawRow | null>((best, row) => {
       if (!row.recording_url?.trim()) return best;
       if (!best) return row;
@@ -1141,7 +1619,7 @@ export async function fetchCalls(
       const bestDisp = findDispositionForRow(best) ?? clusterDisp;
       return rowScore(row, rowDisp) > rowScore(best, bestDisp) ? row : best;
     }, null);
-    return recordingRow?.recording_url?.trim() || null;
+    return recordingRow;
   }
 
   function pbxClusterKey(row: RawRow): string | null {
@@ -1214,11 +1692,15 @@ export async function fetchCalls(
         : best;
     });
 
-    const clusterRecording = bestRecordingUrlFromCluster(cluster, clusterDisp);
-    const winnerWithRecording =
-      clusterRecording && !winner.recording_url?.trim()
-        ? { ...winner, recording_url: clusterRecording }
-        : winner;
+    const recordingRow = bestRecordingUrlFromCluster(cluster, clusterDisp);
+    const winnerWithRecording = recordingRow
+      ? {
+          ...winner,
+          recording_url: winner.recording_url?.trim() || recordingRow.recording_url,
+          pbx_call_id: winner.pbx_call_id?.trim() || recordingRow.pbx_call_id,
+          call_to_extension: winner.call_to_extension?.trim() || recordingRow.call_to_extension,
+        }
+      : winner;
 
     return { winner: winnerWithRecording, disposition: clusterDisp };
   });
@@ -1265,6 +1747,7 @@ export async function fetchCalls(
 
     return {
       id: c.id,
+      pbxCallId: c.pbx_call_id ?? pbxCallIdFromCallsRowId(c.id) ?? null,
       tenantId: c.tenant_id,
       queueId: c.queue_id,
       agentId: effectiveAgentId,
@@ -1272,6 +1755,7 @@ export async function fetchCalls(
       callerNumber: c.caller_number,
       callerName: c.caller_name,
       dialedNumber: direction === "outbound" ? null : (c.dialed_number ?? null),
+      callToExtension: c.call_to_extension ?? null,
       startTime: c.start_time,
       answerTime: c.answer_time,
       endTime: c.end_time,

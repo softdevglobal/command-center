@@ -437,16 +437,140 @@ export async function fetchExtensionStatus(extension: string): Promise<string> {
 // ─── CDR Queries ───────────────────────────────────────────
 
 export interface YeastarCdr {
-  cdrid: string;
-  timestart: string;
-  callfrom: string;
-  callto: string;
-  callduraction: number;
-  talkduraction: number;
-  status: string;
-  type: string;
+  id?: string | number;
+  new_id?: string;
+  cdrid?: string;
+  uid?: string;
+  call_id?: string;
+  callid?: string;
+  time?: string;
+  timestart?: string;
+  time_start?: string;
+  timestamp?: number;
+  call_from?: string;
+  callfrom?: string;
+  call_from_number?: string;
+  call_from_name?: string;
+  call_to?: string;
+  callto?: string;
+  call_to_number?: string;
+  call_to_name?: string;
+  duration?: number;
+  callduraction?: number;
+  call_duration?: number;
+  talk_duration?: number;
+  talkduraction?: number;
+  ring_duration?: number;
+  status?: string;
+  disposition?: string;
+  type?: string;
+  call_type?: string;
+  direction?: string;
   did?: string;
+  did_number?: string;
+  did_name?: string;
+  record_file?: string;
+  recording_file?: string;
   recording?: string;
+  file?: string;
+  [key: string]: unknown;
+}
+
+function extractCdrRows(data: unknown): YeastarCdr[] {
+  if (Array.isArray(data)) return data as YeastarCdr[];
+  if (!data || typeof data !== 'object') return [];
+
+  const body = data as Record<string, unknown>;
+  for (const key of ['cdrlist', 'cdr_list', 'cdrs', 'cdr', 'data', 'items', 'rows', 'records']) {
+    const value = body[key];
+    if (Array.isArray(value)) return value as YeastarCdr[];
+  }
+
+  return [];
+}
+
+function buildCdrRequest(params?: {
+  dateFrom?: string;
+  dateTo?: string;
+  limit?: number;
+}): { endpointPath: string; query: Record<string, string> } {
+  const useSearch = Boolean(params?.dateFrom || params?.dateTo);
+  const pageSize = Math.min(Math.max(params?.limit ?? 200, 1), 10000);
+
+  // `cdr/search` rejects `sort_by` / `order_by` (40002 PARAMETER ERROR) — those are
+  // `cdr/list`-only. `cdr/search` instead filters by `start_time` / `end_time`, which
+  // MUST match the PBX's date/time display format (else it returns zero rows).
+  if (useSearch) {
+    return {
+      endpointPath: `${OPENAPI}/cdr/search`,
+      query: {
+        page_size: String(pageSize),
+        ...(params?.dateFrom ? { start_time: params.dateFrom } : {}),
+        ...(params?.dateTo ? { end_time: params.dateTo } : {}),
+      },
+    };
+  }
+
+  return {
+    endpointPath: `${OPENAPI}/cdr/list`,
+    query: {
+      page_size: String(pageSize),
+      sort_by: 'id',
+      order_by: 'desc',
+    },
+  };
+}
+
+/** Parse a Yeastar CDR response, surfacing IP-forbidden (70087) so callers can switch transport. */
+function parseCdrResponse(data: unknown): YeastarCdr[] {
+  const body = (data ?? {}) as Record<string, unknown>;
+  if (typeof body.errcode === 'number' && body.errcode !== 0) {
+    const msg = String(body.errmsg ?? '');
+    throwIfYeastarIpForbidden(body.errcode, msg);
+    throw new Error(`Yeastar CDR API ${body.errcode}: ${msg || 'unknown error'}`);
+  }
+  return extractCdrRows(data);
+}
+
+/** Edge proxy (server-to-server). Throws {@link IpForbiddenError} when Supabase egress is blocked. */
+async function fetchCdrListViaEdge(
+  endpointPath: string,
+  query: Record<string, string>,
+): Promise<YeastarCdr[]> {
+  const token = await getYeastarToken();
+  const { data, error } = await supabase.functions.invoke('yeastar-api', {
+    body: {
+      endpoint: endpointPath,
+      method: 'GET',
+      params: { access_token: token, ...query },
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  });
+
+  if (error) throw new Error(`Yeastar CDR proxy error: ${error.message}`);
+  if (!data) return [];
+  return parseCdrResponse(data);
+}
+
+/** Browser-direct fallback (your whitelisted office IP) for when Edge egress is IP-blocked. */
+async function fetchCdrListViaBrowser(
+  endpointPath: string,
+  query: Record<string, string>,
+): Promise<YeastarCdr[]> {
+  const token = await getYeastarTokenForRecordings();
+  const qs = new URLSearchParams({ access_token: token, ...query });
+  const url = `${PBX_PUBLIC_BASE_URL}${endpointPath}?${qs}`;
+
+  const res = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const data = (await res.json().catch(() => null)) as unknown;
+  if (!data) throw new Error('Yeastar CDR API unreachable from browser (CORS or network).');
+  return parseCdrResponse(data);
 }
 
 export async function fetchCdrList(params?: {
@@ -455,23 +579,139 @@ export async function fetchCdrList(params?: {
   limit?: number;
 }): Promise<YeastarCdr[]> {
   if (!isYeastarConfigured()) return [];
-  const token = await getYeastarToken();
+  const { endpointPath, query } = buildCdrRequest(params);
 
+  try {
+    return await fetchCdrListViaEdge(endpointPath, query);
+  } catch (e) {
+    // Edge egress blocked by PBX IP rules → retry browser-direct (matches recording flow).
+    if (e instanceof IpForbiddenError) {
+      return await fetchCdrListViaBrowser(endpointPath, query);
+    }
+    throw e;
+  }
+}
+
+// ─── Recording File Queries ─────────────────────────────────
+
+export interface YeastarRecordingFile {
+  id?: string | number;
+  uid?: string;
+  time?: string;
+  call_from?: string;
+  call_to?: string;
+  duration?: number;
+  size?: number;
+  call_type?: string;
+  file?: string;
+  call_from_number?: string;
+  call_from_name?: string;
+  call_to_number?: string;
+  call_to_name?: string;
+  archive_status?: string;
+  archive_path?: string;
+  archive_type?: string;
+  file_path?: string;
+  [key: string]: unknown;
+}
+
+function extractRecordingRows(data: unknown): YeastarRecordingFile[] {
+  if (Array.isArray(data)) return data as YeastarRecordingFile[];
+  if (!data || typeof data !== 'object') return [];
+
+  const body = data as Record<string, unknown>;
+  for (const key of ['data', 'recordings', 'recordinglist', 'items', 'rows', 'records']) {
+    const value = body[key];
+    if (Array.isArray(value)) return value as YeastarRecordingFile[];
+  }
+
+  return [];
+}
+
+function parseRecordingListResponse(data: unknown): YeastarRecordingFile[] {
+  const body = (data ?? {}) as Record<string, unknown>;
+  if (typeof body.errcode === 'number' && body.errcode !== 0) {
+    const msg = String(body.errmsg ?? '');
+    throwIfYeastarIpForbidden(body.errcode, msg);
+    throw new Error(`Yeastar Recording API ${body.errcode}: ${msg || 'unknown error'}`);
+  }
+  return extractRecordingRows(data);
+}
+
+function buildRecordingListRequest(params?: {
+  startUnix?: number;
+  endUnix?: number;
+  limit?: number;
+}): { endpointPath: string; query: Record<string, string> } {
+  const hasDateRange = Number.isFinite(params?.startUnix) || Number.isFinite(params?.endUnix);
+  const pageSize = Math.min(Math.max(params?.limit ?? 200, 1), 10000);
+  return {
+    endpointPath: `${OPENAPI}/recording/${hasDateRange ? 'search' : 'list'}`,
+    query: {
+      page_size: String(pageSize),
+      sort_by: 'time',
+      order_by: 'desc',
+      ...(Number.isFinite(params?.startUnix) ? { start_time: String(params?.startUnix) } : {}),
+      ...(Number.isFinite(params?.endUnix) ? { end_time: String(params?.endUnix) } : {}),
+    },
+  };
+}
+
+async function fetchRecordingListViaEdge(
+  endpointPath: string,
+  query: Record<string, string>,
+): Promise<YeastarRecordingFile[]> {
+  const token = await getYeastarToken();
   const { data, error } = await supabase.functions.invoke('yeastar-api', {
     body: {
-      endpoint: `${OPENAPI}/cdr/query`,
+      endpoint: endpointPath,
       method: 'GET',
-      params: {
-        limit: String(params?.limit ?? 50),
-        ...(params?.dateFrom ? { date_from: params.dateFrom } : {}),
-        ...(params?.dateTo ? { date_to: params.dateTo } : {}),
-      },
-      headers: { Authorization: `Bearer ${token}` }
-    }
+      params: { access_token: token, ...query },
+      headers: { Authorization: `Bearer ${token}` },
+    },
   });
 
-  if (error || !data) return [];
-  return (data.cdrlist ?? []) as YeastarCdr[];
+  if (error) throw new Error(`Yeastar Recording proxy error: ${error.message}`);
+  if (!data) return [];
+  return parseRecordingListResponse(data);
+}
+
+async function fetchRecordingListViaBrowser(
+  endpointPath: string,
+  query: Record<string, string>,
+): Promise<YeastarRecordingFile[]> {
+  const token = await getYeastarTokenForRecordings();
+  const qs = new URLSearchParams({ access_token: token, ...query });
+  const url = `${PBX_PUBLIC_BASE_URL}${endpointPath}?${qs}`;
+
+  const res = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  const data = (await res.json().catch(() => null)) as unknown;
+  if (!data) throw new Error('Yeastar Recording API unreachable from browser (CORS or network).');
+  return parseRecordingListResponse(data);
+}
+
+export async function fetchRecordingList(params?: {
+  startUnix?: number;
+  endUnix?: number;
+  limit?: number;
+}): Promise<YeastarRecordingFile[]> {
+  if (!isYeastarConfigured()) return [];
+  const { endpointPath, query } = buildRecordingListRequest(params);
+
+  try {
+    return await fetchRecordingListViaEdge(endpointPath, query);
+  } catch (e) {
+    if (e instanceof IpForbiddenError) {
+      return await fetchRecordingListViaBrowser(endpointPath, query);
+    }
+    throw e;
+  }
 }
 
 // ─── PBX Info ──────────────────────────────────────────────

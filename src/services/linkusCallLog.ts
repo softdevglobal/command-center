@@ -332,6 +332,8 @@ function mergeLinkusIntoServer(s: Call, l: Call): Call {
     agentId: linkusAgentKnown ? l.agentId : (s.agentId ?? l.agentId),
     agentName: linkusAgentKnown ? l.agentName : (s.agentName && s.agentName !== '—' ? s.agentName : l.agentName),
     dialedNumber: s.dialedNumber ?? l.dialedNumber,
+    pbxCallId: s.pbxCallId ?? l.pbxCallId,
+    callToExtension: s.callToExtension ?? l.callToExtension,
     callerName: s.callerName ?? l.callerName,
     recordingUrl: s.recordingUrl ?? l.recordingUrl,
   };

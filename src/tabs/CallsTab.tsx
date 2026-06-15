@@ -280,7 +280,9 @@ export function CallsTab({
         const dirLabel = c.direction === 'outbound' ? 'outbound' : 'inbound';
         return (
           c.callerNumber.includes(s) ||
+          (c.pbxCallId && c.pbxCallId.toLowerCase().includes(s)) ||
           (c.dialedNumber && c.dialedNumber.includes(s)) ||
+          (c.callToExtension && c.callToExtension.toLowerCase().includes(s)) ||
           (mappedTenantLabel && mappedTenantLabel.toLowerCase().includes(s)) ||
           c.agentName.toLowerCase().includes(s) ||
           c.queueName.toLowerCase().includes(s) ||
@@ -295,7 +297,7 @@ export function CallsTab({
   }, [roleScopedCalls, filterDirection, filterResult, filterQueue, searchTerm, nameMap, didTenantLabelMap]);
 
   const callTableColSpan =
-    8 +
+    9 +
     (permissions.canViewTenantNames ? 1 : 0) +
     (permissions.canViewCallRecordings ? 1 : 0);
   const virtualMinRows = 36;
@@ -362,6 +364,11 @@ export function CallsTab({
         style={useVirtualTable ? { height: virtualRowPx } : undefined}
       >
         <TableCell className="font-mono text-xs">{formatTimeAu(c.startTime)}</TableCell>
+        <TableCell className="max-w-[150px] font-mono text-[11px] text-muted-foreground">
+          <span title={c.pbxCallId ?? c.id}>
+            {c.pbxCallId ?? c.id.replace(/^yeastar-/, '')}
+          </span>
+        </TableCell>
         <TableCell>
           <div className="flex flex-wrap items-center gap-1">
             <Badge
@@ -644,6 +651,7 @@ export function CallsTab({
               <TableHeader>
                 <TableRow>
                   <TableHead>Time</TableHead>
+                  <TableHead>Call ID</TableHead>
                   <TableHead>Direction</TableHead>
                   <TableHead>Customer</TableHead>
                   <TableHead>Phone</TableHead>

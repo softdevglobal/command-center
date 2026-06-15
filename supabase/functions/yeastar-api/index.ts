@@ -401,7 +401,11 @@ Deno.serve(async (req) => {
       }
     }
 
-    console.log(`[yeastar-api] Forwarding to: ${method || 'GET'} ${finalUrl}`)
+    const loggedUrl = new URL(finalUrl)
+    if (loggedUrl.searchParams.has('access_token')) {
+      loggedUrl.searchParams.set('access_token', '…')
+    }
+    console.log(`[yeastar-api] Forwarding to: ${method || 'GET'} ${loggedUrl.toString()}`)
 
     const pbxHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
