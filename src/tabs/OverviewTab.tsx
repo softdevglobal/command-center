@@ -27,7 +27,7 @@ import {
   restoreCallDetailFromSession,
   clearCallDetailSession,
   type CallDetailSnapshot,
-} from "@/components/dashboard/CallDetailsSheet";
+} from "@/components/dashboard/callDetailSnapshot";
 import { MetricCard } from "@/components/dashboard/MetricCard";
 import { QueueSummaryCard } from "@/components/dashboard/QueueSummaryCard";
 import { LiveDot } from "@/components/dashboard/LiveDot";

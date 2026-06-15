@@ -17,13 +17,14 @@ import {
 import type {
   Agent,
   CallerContext,
-  IncomingCall,
-  Queue,
   ServiceRecord,
-  Tenant,
   VehicleRecord,
   WorkshopUserRole,
 } from "@/services/types";
+import {
+  saveCallDetailToSession,
+  type CallDetailSnapshot,
+} from "@/components/dashboard/callDetailSnapshot";
 import { fetchAgentByCallerNumber } from "@/services/dashboardApi";
 import { fetchFirebaseCallerContext } from "@/services/customersApi";
 import { getDIDMappingByDid } from "@/services/didMappingsApi";
@@ -37,7 +38,7 @@ import {
   getServicesByBranch,
   type WorkshopService,
 } from "@/services/servicesApi";
-import { formatDuration, formatPhone } from "@/utils/formatters";
+import { formatPhone } from "@/utils/formatters";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -55,160 +56,13 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/useAuth";
 import { sendBlueCallNote } from "@/services/blueNotesApi";
+import { saveBlackCallNote } from "@/services/blackNotesApi";
 
-type CallSheetMode = "incoming" | "live";
-export type CallQueueKind = "black" | "blue";
-
-export interface CallDetailSnapshot {
-  id: string;
-  mode: CallSheetMode;
-  tenantId: string;
-  queueId: string;
-  workshopName: string;
-  workshopColor: string;
-  queueName: string;
-  queueKind: CallQueueKind;
-  agentOrGroupLabel: string;
-  customerName: string | null;
-  customerPhone: string;
-  callStatusText: string;
-  did: string;
-  didLabel: string;
-  branchId: string;
-  branchName: string;
-  mappingWorkshopName: string;
-  ownerId: string;
-}
-
-// ?? SessionStorage persistence for call detail across page navigation ??
-const CALL_DETAIL_STORAGE_KEY = 'cc_active_call_detail';
-
-export function saveCallDetailToSession(detail: CallDetailSnapshot): void {
-  try {
-    sessionStorage.setItem(CALL_DETAIL_STORAGE_KEY, JSON.stringify(detail));
-  } catch { /* ignore quota errors */ }
-}
-
-export function restoreCallDetailFromSession(): CallDetailSnapshot | null {
-  try {
-    const raw = sessionStorage.getItem(CALL_DETAIL_STORAGE_KEY);
-    if (!raw) return null;
-    const detail = JSON.parse(raw) as CallDetailSnapshot;
-    return {
-      ...detail,
-      queueId: detail.queueId ?? "",
-      queueKind:
-        detail.queueKind ??
-        detectCallQueueKind({ id: detail.queueId, name: detail.queueName }),
-    };
-  } catch {
-    return null;
-  }
-}
-
-export function clearCallDetailSession(): void {
-  try {
-    sessionStorage.removeItem(CALL_DETAIL_STORAGE_KEY);
-  } catch { /* ignore */ }
-}
 
 interface CallDetailsSheetProps {
   detail: CallDetailSnapshot | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-}
-
-function detectCallQueueKind(input: {
-  id?: string | null;
-  name?: string | null;
-  type?: string | null;
-}): CallQueueKind {
-  const values = [input.id, input.name, input.type];
-  return values.some((value) => hasQueueToken(value, "blue")) ? "blue" : "black";
-}
-
-function hasQueueToken(value: string | null | undefined, token: string): boolean {
-  const normalized = String(value ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-  return normalized.split(/\s+/).includes(token);
-}
-
-export function buildIncomingCallSnapshot(
-  call: IncomingCall,
-  now: number,
-  opts?: { showAsEnded?: boolean },
-): CallDetailSnapshot {
-  return {
-    id: call.id,
-    mode: "incoming",
-    tenantId: call.tenantId,
-    queueId: call.queueId,
-    workshopName: call.tenantName,
-    workshopColor: call.tenantBrandColor,
-    queueName: call.queueName,
-    queueKind: detectCallQueueKind({
-      id: call.queueId,
-      name: call.queueName,
-    }),
-    agentOrGroupLabel: `Group: ${call.groupName}`,
-    customerPhone: call.callerNumber,
-    customerName: call.callerName,
-    did: call.did,
-    didLabel: call.didLabel || call.did,
-    branchId: call.branchId ?? "",
-    branchName: call.branchName ?? "",
-    mappingWorkshopName: call.mappingWorkshopName ?? "",
-    ownerId: call.ownerId ?? "",
-    callStatusText: opts?.showAsEnded
-      ? "This call has ended; details stay available on the queue card briefly."
-      : `Incoming for ${formatDuration(now - call.waitingSince)}`,
-  };
-}
-
-export function buildLiveCallSnapshot(args: {
-  agent: Agent;
-  queues: Queue[];
-  tenants: Tenant[];
-  incomingCall?: IncomingCall | null;
-  now: number;
-}): CallDetailSnapshot {
-  const { agent, queues, tenants, incomingCall, now } = args;
-  const activeNumber = agent.currentCaller || incomingCall?.callerNumber || "";
-  const queue = queues.find((entry) => agent.queueIds.includes(entry.id));
-  const tenant = tenants.find((entry) => entry.id === agent.tenantId);
-  const queueId = incomingCall?.queueId || queue?.id || agent.queueIds[0] || "";
-  const queueName = incomingCall?.queueName || queue?.name || agent.queueName || "Live Queue";
-
-  return {
-    id: agent.id,
-    mode: "live",
-    tenantId: agent.tenantId,
-    queueId,
-    workshopName: tenant?.name || agent.tenantName || "Workshop",
-    workshopColor: tenant?.brandColor || "var(--cc-color-cyan)",
-    queueName,
-    queueKind: detectCallQueueKind({
-      id: queueId,
-      name: queueName,
-      type: queue?.type,
-    }),
-    agentOrGroupLabel: `Agent: ${agent.name}${agent.extension ? ` ? Ext ${agent.extension}` : ""}`,
-    customerPhone: activeNumber,
-    customerName: incomingCall?.callerName ?? null,
-    did: incomingCall?.did || "",
-    didLabel:
-      incomingCall?.didLabel ||
-      incomingCall?.did ||
-      queue?.name ||
-      "Active line",
-    branchId: incomingCall?.branchId ?? "",
-    branchName: incomingCall?.branchName ?? "",
-    mappingWorkshopName: incomingCall?.mappingWorkshopName ?? "",
-    ownerId: incomingCall?.ownerId ?? "",
-    callStatusText: `Live for ${agent.callStartTime ? formatDuration(now - agent.callStartTime) : "?"}`,
-  };
 }
 
 export function CallDetailsSheet({
@@ -236,6 +90,10 @@ export function CallDetailsSheet({
   const [blueNoteSending, setBlueNoteSending] = useState(false);
   const [blueNoteMessage, setBlueNoteMessage] = useState<string | null>(null);
   const [blueNoteError, setBlueNoteError] = useState<string | null>(null);
+  const [blackNote, setBlackNote] = useState("");
+  const [blackNoteSaving, setBlackNoteSaving] = useState(false);
+  const [blackNoteMessage, setBlackNoteMessage] = useState<string | null>(null);
+  const [blackNoteError, setBlackNoteError] = useState<string | null>(null);
   const [workshopChatOpen, setWorkshopChatOpen] = useState(false);
   const [workshopChatId, setWorkshopChatId] = useState<string | null>(null);
   const [workshopChatMessages, setWorkshopChatMessages] = useState<ChatMessage[]>([]);
@@ -444,6 +302,10 @@ export function CallDetailsSheet({
     setBlueNoteMessage(null);
     setBlueNoteError(null);
     setBlueNoteSending(false);
+    setBlackNote("");
+    setBlackNoteMessage(null);
+    setBlackNoteError(null);
+    setBlackNoteSaving(false);
   }, [detail?.id, open]);
 
   useEffect(() => {
@@ -645,6 +507,60 @@ export function CallDetailsSheet({
       );
     } finally {
       setBlueNoteSending(false);
+    }
+  }
+
+  async function handleBlackNoteSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (isBlueCall) return;
+
+    const note = blackNote.trim();
+    if (!note) {
+      setBlackNoteError("Add a note before saving.");
+      setBlackNoteMessage(null);
+      return;
+    }
+
+    const ownerId = activeDetail.ownerId.trim();
+    const branchId = activeDetail.branchId.trim();
+    if (!ownerId || !branchId) {
+      setBlackNoteError(
+        mappingLoading
+          ? "DID mapping is still loading. Try saving again in a moment."
+          : "Cannot save note because this call has no owner or branch mapping.",
+      );
+      setBlackNoteMessage(null);
+      return;
+    }
+
+    setBlackNoteSaving(true);
+    setBlackNoteError(null);
+    setBlackNoteMessage(null);
+
+    try {
+      await saveBlackCallNote({
+        callId: activeDetail.id,
+        agentName: session?.displayName?.trim() || "Unknown agent",
+        agentUserId: session?.userId ?? null,
+        callerNumber: activeDetail.customerPhone,
+        callerName: resolvedCustomerName,
+        agentNote: note,
+        didNumber: activeDetail.did || activeDetail.didLabel,
+        ownerId,
+        branchId,
+        branchName: activeDetail.branchName || null,
+        queueId: activeDetail.queueId,
+        queueName: activeDetail.queueName,
+        tenantId: activeDetail.tenantId,
+      });
+      setBlackNote("");
+      setBlackNoteMessage("Note saved to the customer call notes.");
+    } catch (err) {
+      setBlackNoteError(
+        err instanceof Error ? err.message : "Failed to save call note.",
+      );
+    } finally {
+      setBlackNoteSaving(false);
     }
   }
 
@@ -866,6 +782,66 @@ export function CallDetailsSheet({
                 </>
               ) : (
                 <>
+                  <Card className="border-emerald-200 bg-white shadow-sm ring-1 ring-emerald-100">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="flex items-center gap-2 text-base text-emerald-950">
+                        <StickyNote className="h-4 w-4 text-emerald-600" />
+                        Black call note
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <form className="space-y-4" onSubmit={handleBlackNoteSubmit}>
+                        <Textarea
+                          value={blackNote}
+                          onChange={(event) => {
+                            setBlackNote(event.target.value);
+                            setBlackNoteError(null);
+                            setBlackNoteMessage(null);
+                          }}
+                          placeholder="Type the agent note for this caller..."
+                          className="min-h-[150px] resize-y bg-white"
+                          disabled={blackNoteSaving}
+                        />
+                        <div className="grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+                          <div>
+                            DID:{" "}
+                            <span className="font-mono text-slate-700">
+                              {activeDetail.did || activeDetail.didLabel || "-"}
+                            </span>
+                          </div>
+                          <div>
+                            Owner / Branch:{" "}
+                            <span className="font-mono text-slate-700">
+                              {activeDetail.ownerId || "-"} / {activeDetail.branchId || "-"}
+                            </span>
+                          </div>
+                        </div>
+                        {blackNoteError ? (
+                          <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                            {blackNoteError}
+                          </div>
+                        ) : null}
+                        {blackNoteMessage ? (
+                          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                            {blackNoteMessage}
+                          </div>
+                        ) : null}
+                        <Button
+                          type="submit"
+                          className="bg-emerald-600 text-white hover:bg-emerald-700"
+                          disabled={blackNoteSaving || mappingLoading}
+                        >
+                          {blackNoteSaving ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <StickyNote className="h-4 w-4" />
+                          )}
+                          Save note
+                        </Button>
+                      </form>
+                    </CardContent>
+                  </Card>
+
                   {callerContext?.customer.notes && (
                     <Card className="border-slate-200 bg-white shadow-sm">
                       <CardHeader className="pb-3">

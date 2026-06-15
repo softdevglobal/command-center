@@ -2,7 +2,7 @@ import type { Queue, Tenant } from '@/services/types';
 import { Card, CardContent } from '@/components/ui/card';
 import { PhoneIncoming, Clock, Users, PhoneCall, HeadphonesIcon, ChevronRight } from 'lucide-react';
 import { formatPhone } from '@/utils/formatters';
-import type { CallDetailSnapshot } from '@/components/dashboard/CallDetailsSheet';
+import type { CallDetailSnapshot } from '@/components/dashboard/callDetailSnapshot';
 
 export interface IncomingCallerContext {
   number: string;

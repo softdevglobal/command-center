@@ -2,10 +2,8 @@ import { useRef, useState, useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useDashboard } from '@/context/DashboardDataContext';
 import { useCallNotification } from '@/context/CallNotificationContext';
-import { 
-  buildIncomingCallSnapshot, 
-  CallDetailsSheet 
-} from '@/components/dashboard/CallDetailsSheet';
+import { CallDetailsSheet } from '@/components/dashboard/CallDetailsSheet';
+import { buildIncomingCallSnapshot } from '@/components/dashboard/callDetailSnapshot';
 import { Card } from '@/components/ui/card';
 import { Phone, ExternalLink, GripVertical } from 'lucide-react';
 import { formatPhone } from '@/utils/formatters';

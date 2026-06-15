@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, ReactNode } from 'react';
-import { CallDetailSnapshot } from '@/components/dashboard/CallDetailsSheet';
+import type { CallDetailSnapshot } from '@/components/dashboard/callDetailSnapshot';
 
 interface CallNotificationContextType {
   selectedCall: CallDetailSnapshot | null;

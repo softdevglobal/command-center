@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react';
 import type { UserSession, Tenant, Queue, AgentGroup, IncomingCall } from '@/services/types';
 import { formatDuration } from '@/utils/formatters';
+import { CallDetailsSheet } from '@/components/dashboard/CallDetailsSheet';
 import {
   buildIncomingCallSnapshot,
-  CallDetailsSheet,
   type CallDetailSnapshot,
-} from '@/components/dashboard/CallDetailsSheet';
+} from '@/components/dashboard/callDetailSnapshot';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { LiveDot } from './LiveDot';
