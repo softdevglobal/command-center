@@ -110,7 +110,9 @@ export function QueueSummaryCard({
 
   return (
     <Card
-      className={`group relative overflow-hidden bg-white transition-all duration-300 ${
+      className={`group relative flex flex-col overflow-hidden bg-white transition-all duration-300 ${
+        showCallerRows ? 'h-[500px]' : ''
+      } ${
         interactive ? 'cursor-pointer hover:-translate-y-1 hover:shadow-xl' : 'shadow-sm'
       } ${isIncoming || showLive || showEndedCallerRecall ? 'ring-2 ring-offset-2 shadow-lg' : 'border-border/80'}`}
       style={
@@ -153,7 +155,7 @@ export function QueueSummaryCard({
       {/* Glossy top highlight */}
       <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-white/0 via-white/80 to-white/0" />
 
-      <CardContent className="relative space-y-5 p-5">
+      <CardContent className="relative flex min-h-0 flex-1 flex-col gap-4 p-5">
         <div className="flex items-start justify-between">
           <div className="flex items-start gap-3">
             <div 
@@ -213,7 +215,7 @@ export function QueueSummaryCard({
 
         {/* Callers List (Incoming or Answered/Live) */}
         {showCallerRows && (
-          <div className="flex flex-col gap-2">
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden rounded-xl bg-white/45 p-1.5 pr-2">
             {incomingCallers.map((caller, i) => {
               const openDetail = caller.detail && onIncomingCallerClick;
               
@@ -290,15 +292,12 @@ export function QueueSummaryCard({
                         }
                       : undefined
                   }
-                  className={`relative overflow-hidden rounded-xl ${cardBg} p-2.5 ring-1 shadow-sm transition-all ${
+                  className={`relative min-h-[64px] overflow-hidden rounded-xl ${cardBg} p-3 ring-1 shadow-sm transition-all ${
                     openDetail
                       ? `cursor-pointer ${hoverStyle} focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`
                       : nonHoverStyle
                   }`}
                 >
-                  <div className="absolute -right-4 -top-4 opacity-10">
-                    <Icon size={56} />
-                  </div>
                   <div className="relative flex items-center gap-3">
                     <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${iconContainerStyle} shadow-sm`}>
                       <Icon
@@ -355,7 +354,7 @@ export function QueueSummaryCard({
         )}
 
         {/* Stats Grid */}
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid shrink-0 grid-cols-4 gap-2">
           {stats.map((stat) => {
             const Icon = stat.icon;
             return (
