@@ -23,7 +23,7 @@ const TABS_NEED_AGENT_GROUPS = new Set(['overview']);
 
 const TABS_NEED_SIP = new Set(['sip']);
 
-const TABS_NEED_AGENT_ONBOARDING = new Set(['agent-onboarding']);
+const TABS_NEED_AGENT_ONBOARDING = new Set<string>();
 
 export function callsFetchLimitForTab(tab: string): number {
   if (tab === 'calls' || tab === 'agent-performance') return CALLS_LIMIT_FULL;

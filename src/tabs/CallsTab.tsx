@@ -27,7 +27,8 @@ import {
   ChevronLeft, 
   ChevronRight, 
   Calendar,
-  RotateCcw
+  RotateCcw,
+  StickyNote
 } from 'lucide-react';
 import { 
   getAustralianDateKey, 
@@ -35,6 +36,7 @@ import {
   formatAustralianDayHeading 
 } from '@/utils/australianTime';
 import { CallRecordingPlayer } from '@/components/dashboard/CallRecordingPlayer';
+import { CallNoteDialog } from '@/components/dashboard/CallNoteDialog';
 
 interface CallsTabProps {
   calls: Call[];
@@ -208,6 +210,19 @@ function isAgentVisibleCallResult(result: CallResult): boolean {
   return result === 'answered' || result === 'abandoned' || result === 'missed';
 }
 
+/** Loose token match used to tell apart blue-queue calls (which use a separate notes flow). */
+function hasQueueToken(value: string | null | undefined, token: string): boolean {
+  if (!value) return false;
+  return value.toLowerCase().includes(token);
+}
+
+/** Black-queue agent notes apply to every call except blue-queue calls. */
+function isBlueQueueCall(call: Call): boolean {
+  return (
+    hasQueueToken(call.queueName, 'blue') || hasQueueToken(call.queueId, 'blue')
+  );
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 export function CallsTab({ 
@@ -226,6 +241,8 @@ export function CallsTab({
   const [filterDirection, setFilterDirection] = useState<'all' | 'inbound' | 'outbound'>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [linkusLog, setLinkusLog] = useState<Call[]>(() => readLinkusCallLog());
+  const [noteCall, setNoteCall] = useState<Call | null>(null);
+  const [noteOpen, setNoteOpen] = useState(false);
 
   useEffect(() => {
     const sync = () => setLinkusLog(readLinkusCallLog());
@@ -296,6 +313,7 @@ export function CallsTab({
 
   const callTableColSpan =
     8 +
+    1 + // Note column
     (permissions.canViewTenantNames ? 1 : 0) +
     (permissions.canViewCallRecordings ? 1 : 0);
   const virtualMinRows = 36;
@@ -439,6 +457,26 @@ export function CallsTab({
             )}
           </TableCell>
         )}
+        <TableCell>
+          {isBlueQueueCall(c) ? (
+            <span className="text-muted-foreground text-[10px]">—</span>
+          ) : (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 shrink-0 gap-1.5 rounded-full bg-slate-50 px-3 text-xs font-medium text-slate-700 hover:bg-slate-100"
+              onClick={() => {
+                setNoteCall(c);
+                setNoteOpen(true);
+              }}
+              title="Add agent note (saves with recording)"
+            >
+              <StickyNote className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+              Note
+            </Button>
+          )}
+        </TableCell>
       </TableRow>
     );
   }
@@ -657,6 +695,7 @@ export function CallsTab({
                   {permissions.canViewCallRecordings && (
                     <TableHead>Recording</TableHead>
                   )}
+                  <TableHead>Note</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -685,6 +724,21 @@ export function CallsTab({
           )}
         </CardContent>
       </Card>
+
+      <CallNoteDialog
+        open={noteOpen}
+        onOpenChange={(o) => {
+          setNoteOpen(o);
+          if (!o) setNoteCall(null);
+        }}
+        call={noteCall}
+        resolvedCustomerName={
+          noteCall ? nameMap.get(noteCall.callerNumber) || noteCall.callerName : null
+        }
+        tenants={tenants}
+        session={session}
+        permissions={permissions}
+      />
     </div>
   );
 }

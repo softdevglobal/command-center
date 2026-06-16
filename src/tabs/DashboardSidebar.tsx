@@ -24,7 +24,6 @@ import {
   Radio,
   Target,
   Users,
-  UserPlus,
   History,
   CalendarDays,
 } from 'lucide-react';
@@ -84,7 +83,6 @@ const NAV_ITEMS: SidebarEntry[] = [
       { key: 'agent-performance', label: 'Performance', icon: Activity },
     ],
   },
-  { kind: 'item', key: 'agent-onboarding', label: 'Agent Onboarding', icon: UserPlus, perm: 'canViewAgentOnboardingTab' },
   { kind: 'item', key: 'chat', label: 'Chat', icon: MessageSquare, perm: 'canViewChatTab' },
   { kind: 'item', key: 'sms', label: 'SMS', icon: MessageSquareText, perm: 'canViewSmsTab' },
   { kind: 'item', key: 'calls', label: 'Calls', icon: Phone, perm: 'canViewCallsTab' },

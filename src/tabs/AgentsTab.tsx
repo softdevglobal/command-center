@@ -26,7 +26,9 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { updateAgent, deleteAgent } from '@/services/agentApis';
+import { createAgentViaEdge } from '@/services/agentOnboardingApi';
 import { fetchBmsWorkshopOptions } from '@/services/didMappingsApi';
+import { CreateAgentModal, type CreateAgentData } from '@/components/dashboard/CreateAgentModal';
 import { Pencil, Trash2, MessageSquare } from 'lucide-react';
 import { useDashboard } from '@/context/DashboardDataContext';
 
@@ -53,6 +55,7 @@ export function AgentsTab({ agents, queues, tenants, permissions, now, onRefresh
   const [agentGroupTab, setAgentGroupTab] = useState<AgentGroupTab>('command-centre');
   const [filterWorkshopOwnerUid, setFilterWorkshopOwnerUid] = useState('all');
   const [filterQueue, setFilterQueue] = useState('all');
+  const [onboardOpen, setOnboardOpen] = useState(false);
 
   const [editOpen, setEditOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
@@ -163,6 +166,11 @@ export function AgentsTab({ agents, queues, tenants, permissions, now, onRefresh
     }
   }, [deletingAgent, onRefresh]);
 
+  const handleCreateAgent = useCallback(async (data: CreateAgentData) => {
+    await createAgentViaEdge(data);
+    onRefresh();
+  }, [onRefresh]);
+
   useEffect(() => {
     let cancelled = false;
     fetchBmsWorkshopOptions()
@@ -264,9 +272,31 @@ export function AgentsTab({ agents, queues, tenants, permissions, now, onRefresh
   }, [tenants]);
 
   const canManage = permissions.canManageAgents;
+  const canOnboard = permissions.canOnboardAgents;
 
   return (
     <div className="cc-fade-in space-y-6">
+      <Card className="border-border/80 bg-white shadow-sm">
+        <CardContent className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-muted-foreground">
+              Agent Directory
+            </div>
+            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">
+              Manage agents and onboarding
+            </h2>
+          </div>
+          {canOnboard && (
+            <Button
+              type="button"
+              onClick={() => setOnboardOpen(true)}
+            >
+              Onboard Agent
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+
       <Card className="border-border/80 bg-white shadow-sm">
         <CardContent className="space-y-5 p-5">
           <div>
@@ -605,6 +635,13 @@ export function AgentsTab({ agents, queues, tenants, permissions, now, onRefresh
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <CreateAgentModal
+        open={onboardOpen}
+        onClose={() => setOnboardOpen(false)}
+        onSubmit={handleCreateAgent}
+        tenants={tenants}
+      />
     </div>
   );
 }

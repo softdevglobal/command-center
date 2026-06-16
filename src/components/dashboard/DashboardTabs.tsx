@@ -15,7 +15,6 @@ export function DashboardTabs({ tabs, selectedTab, onSelect, permissions }: Dash
     if (t.key === 'agents') return permissions.canViewAgentsTab;
     if (t.key === 'chat') return permissions.canViewChatTab;
     if (t.key === 'sms') return permissions.canViewSmsTab;
-    if (t.key === 'agent-onboarding') return permissions.canViewAgentOnboardingTab;
     if (t.key === 'calls') return permissions.canViewCallsTab;
     if (t.key === 'bookings') return permissions.canViewBookingsTab;
     if (t.key === 'sip') return permissions.canViewSipTab;

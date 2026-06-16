@@ -90,7 +90,8 @@ export function yeastarCallRowId(linkusCallId: string): string {
   return `yeastar-${base}`;
 }
 
-function yeastarRowIdFromLocalLinkusCallId(localId: string): string | null {
+/** Map dashboard local ids (`linkus-…`, `incoming-…`) to Supabase CDR row id (`yeastar-…`). */
+export function yeastarRowIdFromLocalLinkusCallId(localId: string): string | null {
   if (localId.startsWith('yeastar-')) return localId;
   if (!localId.startsWith('linkus-')) return null;
   const withoutPrefix = localId.slice('linkus-'.length);

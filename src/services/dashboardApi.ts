@@ -1,5 +1,6 @@
 import { supabase } from "@/integrations/supabase/client";
 import { API_BASE, apiFetch } from "@/lib/api";
+import { yeastarRowIdFromLocalLinkusCallId } from "@/services/linkusCallLog";
 import type {
   Tenant,
   Queue,
@@ -1027,6 +1028,83 @@ async function fetchCallsApiRows(
     .filter((row) => row.id && row.caller_number)
     .sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime())
     .slice(0, Math.min(Math.max(limit, 1), 1000));
+}
+
+/** Map a call-details-sheet id to possible Supabase CDR row ids. */
+function cdrCallIdCandidatesFromSheetCallId(callId: string): string[] {
+  const trimmed = callId.trim();
+  if (!trimmed) return [];
+
+  const out = new Set<string>([trimmed]);
+
+  if (trimmed.startsWith("incoming-")) {
+    const pbxId = trimmed.slice("incoming-".length).trim();
+    if (pbxId) out.add(`yeastar-${pbxId}`);
+  } else if (trimmed.startsWith("linkus-")) {
+    const yeastarId = yeastarRowIdFromLocalLinkusCallId(trimmed);
+    if (yeastarId) out.add(yeastarId);
+  } else if (!trimmed.startsWith("yeastar-")) {
+    out.add(`yeastar-${trimmed}`);
+  }
+
+  return [...out];
+}
+
+function pbxIdFromSheetOrCdrCallId(callId: string): string {
+  if (callId.startsWith("yeastar-")) return callId.slice("yeastar-".length);
+  if (callId.startsWith("incoming-")) return callId.slice("incoming-".length);
+  if (callId.startsWith("linkus-")) {
+    const yeastarId = yeastarRowIdFromLocalLinkusCallId(callId);
+    if (yeastarId?.startsWith("yeastar-")) return yeastarId.slice("yeastar-".length);
+  }
+  return callId;
+}
+
+/**
+ * Find the CDR recording for a specific call id (not "latest caller" heuristics).
+ *
+ * Sheet ids come from Yeastar webhooks as `incoming-<pbx_call_id>`; CDR rows use
+ * `yeastar-<pbx_call_id>`. Linkus softphone ids map the same way. When multiple
+ * CDR legs exist for one PBX call, returns the leg that has a recording.
+ */
+export async function findCallRecordingByCallId(
+  callId: string,
+  tenantId?: string | null,
+): Promise<{ callId: string; recordingUrl: string } | null> {
+  const trimmed = callId.trim();
+  if (!trimmed) return null;
+
+  const cdrCandidates = cdrCallIdCandidatesFromSheetCallId(trimmed);
+  const pbxKeys = [
+    ...new Set(
+      cdrCandidates.flatMap((candidate) =>
+        pbxDispositionLookupKeys(pbxIdFromSheetOrCdrCallId(candidate)),
+      ),
+    ),
+  ];
+
+  const rows = await fetchCallsApiRows(tenantId ?? undefined, 200);
+
+  for (const candidate of cdrCandidates) {
+    const exact = rows.find(
+      (row) => row.id === candidate && row.recording_url?.trim(),
+    );
+    if (exact?.recording_url) {
+      return { callId: exact.id, recordingUrl: exact.recording_url.trim() };
+    }
+  }
+
+  const compatible = rows.filter((row) => {
+    const url = row.recording_url?.trim();
+    if (!url) return false;
+    const rowPbx = pbxCallIdFromCallsRowId(row.id) ?? row.id;
+    return pbxKeys.some((key) => pbxCallIdsCompatible(key, rowPbx));
+  });
+
+  const best = compatible[0];
+  return best?.recording_url
+    ? { callId: best.id, recordingUrl: best.recording_url.trim() }
+    : null;
 }
 
 /** PBX row direction, or infer outbound when `direction` column is absent / default but CDR shape matches outbound. */
