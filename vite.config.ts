@@ -10,19 +10,23 @@ export default defineConfig(({ mode }) => {
   /**
    * Split-proxy strategy:
    *
-   *  LOCAL_API_PATHS  – comma-separated list of /api sub-paths that are still
-   *                     running on localhost:5050 (under development / testing).
-   *                     Example: /api/auth,/api/agents
+   *  LOCAL_API_PATHS – comma-separated /api sub-paths still running on
+   *                    localhost:5050 (under development / testing).
+   *                    Example: /api/auth,/api/agents
    *
-   *  DEPLOYED_API_URL – the remote backend that handles every other /api/* call.
-   *                     Defaults to the EC2 instance.
+   *  VITE_API_BASE   – the deployed backend base URL (e.g. http://ec2:5050/api).
+   *                    The proxy strips the trailing /api to get the host target.
+   *                    Leave unset in dev so the browser uses the relative /api
+   *                    path and the proxy handles routing.
    *
-   * Any path listed in LOCAL_API_PATHS gets its own proxy rule pointing at
-   * localhost:5050; the catch-all /api rule points at the deployed server.
-   * If LOCAL_API_PATHS is empty, ALL /api traffic goes to the deployed server.
+   * Paths in LOCAL_API_PATHS → localhost:5050.
+   * Everything else (/api catch-all) → deployed backend host.
    */
-  const deployedApiUrl =
-    env.DEPLOYED_API_URL?.trim() || "http://13.236.183.142:5050";
+  const viteApiBase = env.VITE_API_BASE?.trim().replace(/\/+$/, "");
+  // Derive host from VITE_API_BASE by stripping the /api path segment
+  const deployedApiUrl = viteApiBase
+    ? viteApiBase.replace(/\/api$/, "")
+    : "http://13.236.183.142:5050";
 
   const localPaths: string[] = (env.LOCAL_API_PATHS || "")
     .split(",")
