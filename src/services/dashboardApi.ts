@@ -1538,6 +1538,73 @@ function pbxCallIdsCompatible(a: string, b: string): boolean {
   return ad === bd || ad.endsWith(bd) || bd.endsWith(ad);
 }
 
+function cdrCallIdCandidatesFromSheetCallId(callId: string): string[] {
+  const trimmed = callId.trim();
+  if (!trimmed) return [];
+
+  const out = new Set<string>([trimmed]);
+  if (trimmed.startsWith("incoming-")) {
+    const pbxId = trimmed.slice("incoming-".length).trim();
+    if (pbxId) out.add(`yeastar-${pbxId}`);
+  } else if (trimmed.startsWith("linkus-")) {
+    const withoutPrefix = trimmed.slice("linkus-".length);
+    const linkusCallId = withoutPrefix.replace(/-\d{10,}$/, "").trim();
+    if (linkusCallId) out.add(`yeastar-${linkusCallId.split("@")[0]?.trim() || linkusCallId}`);
+  } else if (!trimmed.startsWith("yeastar-")) {
+    out.add(`yeastar-${trimmed}`);
+  }
+
+  return [...out];
+}
+
+function pbxIdFromSheetOrCdrCallId(callId: string): string {
+  if (callId.startsWith("yeastar-")) return callId.slice("yeastar-".length);
+  if (callId.startsWith("incoming-")) return callId.slice("incoming-".length);
+  if (callId.startsWith("linkus-")) {
+    const withoutPrefix = callId.slice("linkus-".length);
+    return withoutPrefix.replace(/-\d{10,}$/, "").trim();
+  }
+  return callId;
+}
+
+export async function findCallRecordingByCallId(
+  callId: string,
+  tenantId?: string | null,
+): Promise<{ callId: string; recordingUrl: string } | null> {
+  const trimmed = callId.trim();
+  if (!trimmed) return null;
+
+  const cdrCandidates = cdrCallIdCandidatesFromSheetCallId(trimmed);
+  const pbxKeys = [
+    ...new Set(
+      cdrCandidates.flatMap((candidate) =>
+        pbxDispositionLookupKeys(pbxIdFromSheetOrCdrCallId(candidate)),
+      ),
+    ),
+  ];
+
+  const rows = await fetchCallsApiRows(tenantId ?? undefined, 300);
+  for (const candidate of cdrCandidates) {
+    const exact = rows.find(
+      (row) => row.id === candidate && row.recording_url?.trim(),
+    );
+    if (exact?.recording_url) {
+      return { callId: exact.id, recordingUrl: exact.recording_url.trim() };
+    }
+  }
+
+  const compatible = rows.find((row) => {
+    const url = row.recording_url?.trim();
+    if (!url) return false;
+    const rowPbx = row.pbx_call_id || pbxCallIdFromCallsRowId(row.id) || row.id;
+    return pbxKeys.some((key) => pbxCallIdsCompatible(key, rowPbx));
+  });
+
+  return compatible?.recording_url
+    ? { callId: compatible.id, recordingUrl: compatible.recording_url.trim() }
+    : null;
+}
+
 export async function fetchCalls(
   tenantId?: string | null,
   limit: number = 200,

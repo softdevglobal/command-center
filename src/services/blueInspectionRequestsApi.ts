@@ -1,12 +1,17 @@
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiUrl } from "@/lib/api";
 
-const DEFAULT_BLUE_INSPECTION_REQUESTS_API_URL =
-  "http://127.0.0.1:5050/api/requests";
-
-const BLUE_INSPECTION_REQUESTS_API_URL =
-  (import.meta.env.VITE_BLUE_INSPECTION_REQUESTS_API_URL as string | undefined)
+function resolveInspectionRequestsApiBase(): string {
+  const override = (
+    import.meta.env.VITE_BLUE_INSPECTION_REQUESTS_API_URL as string | undefined
+  )
     ?.trim()
-    .replace(/\/+$/, "") || DEFAULT_BLUE_INSPECTION_REQUESTS_API_URL;
+    .replace(/\/+$/, "");
+  if (!override) return apiUrl("/inspection-requests");
+  if (/^https?:\/\//i.test(override)) return override;
+  return apiUrl(override.startsWith("/") ? override : `/${override}`);
+}
+
+const BLUE_INSPECTION_REQUESTS_API_URL = resolveInspectionRequestsApiBase();
 
 export interface BlueInspectionRequest {
   id: string;

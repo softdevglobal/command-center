@@ -1089,12 +1089,9 @@ async function streamRecordingThroughEdge(
  * stream_recording so Edge can use it even when no YEASTAR_* Supabase secrets are set.
  * Edge's own server secrets (if set) are tried first, so the two complement each other.
  */
-export async function getRecordingPlaybackObjectUrl(
-  recordingPath: string
-): Promise<string> {
-  const toBlobUrl = ({ buf, mime }: { buf: ArrayBuffer; mime: string }) =>
-    URL.createObjectURL(new Blob([buf], { type: mime }));
-
+export async function getRecordingBytes(
+  recordingPath: string,
+): Promise<{ buf: ArrayBuffer; mime: string }> {
   // ── get a client-side token (via Edge proxy get_token — no CORS) ─────────────
   // Use the cache if still valid; otherwise try each credential through the Edge proxy.
   let clientToken: string | null = null;
@@ -1106,7 +1103,7 @@ export async function getRecordingPlaybackObjectUrl(
 
   // ── 1. Edge stream ────────────────────────────────────────────────────────────
   try {
-    return toBlobUrl(await streamRecordingThroughEdge(recordingPath, clientToken ?? undefined));
+    return await streamRecordingThroughEdge(recordingPath, clientToken ?? undefined);
   } catch (edgeErr) {
     if (edgeErr instanceof RecordingAccessDeniedError) {
       const denied = edgeErr.serverDenied?.length
@@ -1129,11 +1126,11 @@ export async function getRecordingPlaybackObjectUrl(
   // the actual WAV bytes through the Edge function so the browser doesn't fetch
   // cross-origin audio (which would CORS-fail).
   try {
-    return toBlobUrl(await fetchRecordingViaBrowserPipeline(recordingPath));
+    return await fetchRecordingViaBrowserPipeline(recordingPath);
   } catch (browserErr) {
     if (browserErr instanceof RecordingTokenExpiredError) {
       clearRecordingAuth();
-      return toBlobUrl(await fetchRecordingViaBrowserPipeline(recordingPath));
+      return await fetchRecordingViaBrowserPipeline(recordingPath);
     }
     if (browserErr instanceof RecordingAccessDeniedError) {
       const denied = browserErr.serverDenied?.length
@@ -1143,6 +1140,21 @@ export async function getRecordingPlaybackObjectUrl(
     }
     throw browserErr;
   }
+}
+
+export async function getRecordingPlaybackObjectUrl(
+  recordingPath: string
+): Promise<string> {
+  const { buf, mime } = await getRecordingBytes(recordingPath);
+  return URL.createObjectURL(new Blob([buf], { type: mime }));
+}
+
+export function recordingExtensionForMime(mime: string): string {
+  const m = mime.toLowerCase();
+  if (m.includes('mpeg') || m.includes('mp3')) return 'mp3';
+  if (m.includes('ogg')) return 'ogg';
+  if (m.includes('wav')) return 'wav';
+  return 'wav';
 }
 
 function sniffAudioMimeFromUrl(url: string): string {

@@ -142,7 +142,8 @@ async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Re
   }
   const url = `${BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
 
-  return apiFetch(url, { ...init, headers });
+  // BMS chat errors (401/403/404) must not invalidate the dashboard session.
+  return apiFetch(url, { ...init, headers, logoutOnSessionExpired: false });
 }
 
 async function authorizedFetchCallCenter(
@@ -154,7 +155,7 @@ async function authorizedFetchCallCenter(
     headers.set('Content-Type', 'application/json');
   }
   const url = `${CALL_CENTER_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
-  return apiFetch(url, { ...init, headers });
+  return apiFetch(url, { ...init, headers, logoutOnSessionExpired: false });
 }
 
 async function authorizedFetchAgentChat(
@@ -172,7 +173,7 @@ async function authorizedFetchAgentChat(
 
   const base = AGENT_CHAT_API_URL.replace(/\/+$/, '');
   const url = `${base}${path.startsWith('/') ? path : `/${path}`}`;
-  return apiFetch(url, { ...init, headers });
+  return apiFetch(url, { ...init, headers, logoutOnSessionExpired: false });
 }
 
 async function readHttpErrorDetail(res: Response): Promise<string> {

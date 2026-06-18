@@ -11,7 +11,7 @@ import {
   type DIDMappingInput,
 } from '@/services/didMappingsApi';
 import { fetchTenants, fetchQueues } from '@/services/dashboardApi';
-import { apiFetch, getAccessToken } from '@/lib/api';
+import { apiFetch, apiUrl, getAccessToken } from '@/lib/api';
 import { EmptyState } from '@/components/dashboard/EmptyState';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -77,7 +77,7 @@ type MappingTableFilter = 'all' | MappingDialogMode;
 
 const BLUE_BUSINESSES_API_URL =
   (import.meta.env.VITE_BLUE_BUSINESSES_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
-  'http://127.0.0.1:5050/api/businesses';
+  apiUrl('/businesses');
 
 const CURRENT_BLUE_BUSINESS_ID = '__current_blue_business__';
 
