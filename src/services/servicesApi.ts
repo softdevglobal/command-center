@@ -1,20 +1,10 @@
-import { db } from '@/lib/firebase';
 import {
-  addDoc,
-  arrayRemove,
-  arrayUnion,
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  getDocs,
-  onSnapshot,
-  query,
-  serverTimestamp,
-  updateDoc,
-  where,
-  type DocumentData,
-} from 'firebase/firestore';
+  BMS_BLACK_API_URL,
+  bmsBlackFetch,
+  bmsBlackHeaders,
+} from '@/services/bmsBlackApi';
+
+const BASE_URL = BMS_BLACK_API_URL;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -246,124 +236,7 @@ function extractServiceRows(raw: unknown): unknown[] {
   return [];
 }
 
-async function addServiceToBranch(branchId: string, serviceId: string) {
-  await updateDoc(doc(db, 'branches', branchId), {
-    serviceIds: arrayUnion(serviceId),
-    updatedAt: serverTimestamp(),
-  });
-}
-
-async function removeServiceFromBranch(branchId: string, serviceId: string) {
-  await updateDoc(doc(db, 'branches', branchId), {
-    serviceIds: arrayRemove(serviceId),
-    updatedAt: serverTimestamp(),
-  });
-}
-
-// ─── Create ───────────────────────────────────────────────────────────────────
-
-export async function createService(ownerUid: string, data: ServiceInput): Promise<string> {
-  const ref = await addDoc(collection(db, 'services'), {
-    ownerUid,
-    ...data,
-    checklist: data.checklist ?? [],
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-  });
-
-  if (data.branches.length > 0) {
-    await Promise.all(data.branches.map((id) => addServiceToBranch(id, ref.id)));
-  }
-
-  return ref.id;
-}
-
-// ─── Update ───────────────────────────────────────────────────────────────────
-
-export async function updateService(serviceId: string, data: Partial<ServiceInput>): Promise<void> {
-  const serviceRef = doc(db, 'services', serviceId);
-  const snap = await getDoc(serviceRef);
-  const current = snap.data();
-
-  const oldBranches: string[] = current?.branches ?? [];
-  const newBranches: string[] = data.branches ?? oldBranches;
-  const toAdd    = newBranches.filter((b) => !oldBranches.includes(b));
-  const toRemove = oldBranches.filter((b) => !newBranches.includes(b));
-
-  await updateDoc(serviceRef, { ...data, updatedAt: serverTimestamp() });
-
-  await Promise.all([
-    ...toAdd.map((id) => addServiceToBranch(id, serviceId)),
-    ...toRemove.map((id) => removeServiceFromBranch(id, serviceId)),
-  ]);
-}
-
-// ─── Delete ───────────────────────────────────────────────────────────────────
-
-export async function deleteService(serviceId: string): Promise<void> {
-  const serviceRef = doc(db, 'services', serviceId);
-  const snap = await getDoc(serviceRef);
-  const branches: string[] = snap.data()?.branches ?? [];
-
-  if (branches.length > 0) {
-    await Promise.all(branches.map((id) => removeServiceFromBranch(id, serviceId)));
-  }
-
-  await deleteDoc(serviceRef);
-}
-
-// ─── Subscribe (real-time) ────────────────────────────────────────────────────
-
-export function subscribeServices(
-  ownerUid: string,
-  onChange: (rows: WorkshopService[]) => void,
-): () => void {
-  const q = query(collection(db, 'services'), where('ownerUid', '==', ownerUid));
-
-  return onSnapshot(
-    q,
-    (snap) => {
-      onChange(
-        snap.docs.map((d) => {
-          const raw = d.data() as DocumentData;
-          return {
-            id: d.id,
-            ownerUid: String(raw.ownerUid ?? ''),
-            name: String(raw.name ?? ''),
-            price: Number(raw.price ?? 0),
-            duration: Number(raw.duration ?? 0),
-            icon: raw.icon ?? null,
-            imageUrl: raw.imageUrl ?? null,
-            reviews: raw.reviews != null ? Number(raw.reviews) : null,
-            branches: Array.isArray(raw.branches) ? raw.branches : [],
-            staffIds: Array.isArray(raw.staffIds) ? raw.staffIds : [],
-            checklist: normalizeChecklist(Array.isArray(raw.checklist) ? raw.checklist : []),
-            completionImageUrl: raw.completionImageUrl ?? null,
-          } satisfies WorkshopService;
-        }),
-      );
-    },
-    (error) => {
-      if (error.code === 'permission-denied') {
-        // console.warn('[servicesApi] permission denied — user may not be authenticated');
-        onChange([]);
-      } else {
-        // console.error('[servicesApi] snapshot error:', error);
-        onChange([]);
-      }
-    },
-  );
-}
-
 // ─── REST API helpers ─────────────────────────────────────────────────────────
-
-import {
-  BMS_BLACK_API_URL,
-  bmsBlackFetch,
-  bmsBlackHeaders,
-} from '@/services/bmsBlackApi';
-
-const BASE_URL = BMS_BLACK_API_URL;
 
 function apiHeaders(ownerUid: string): HeadersInit {
   return bmsBlackHeaders(ownerUid);

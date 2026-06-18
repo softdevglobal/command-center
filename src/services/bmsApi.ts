@@ -3,7 +3,7 @@
  *
  * Usage:
  *   import { bmsApi } from '@/services/bmsApi';
- *   const api = bmsApi(idToken, ownerUid);   // idToken from useFirebaseAuth()
+ *   const api = bmsApi(ownerUid);
  *   const slots = await api.getAvailability({ branchId, date, serviceIds });
  *   const booking = await api.createBooking({ ... });
  */
@@ -120,9 +120,9 @@ export interface CreateCallLogPayload {
 
 async function request<T>(
   path: string,
-  options: RequestInit & { token?: string; tenant?: string } = {},
+  options: RequestInit & { tenant?: string } = {},
 ): Promise<T> {
-  const { token: _token, tenant, ...init } = options;
+  const { tenant, ...init } = options;
   const headers = bmsBlackHeaders(tenant, init.headers);
 
   // DEBUG: Log exactly what we're sending (remove after fixing)
@@ -150,61 +150,59 @@ async function request<T>(
 /* ─────────────────────── API factory ─────────────────────── */
 
 /**
- * Create a scoped BMS API client.
+ * Create a scoped BMS API client (auth via dashboard Supabase session JWT).
  *
- * @param idToken  — Firebase ID token from `useFirebaseAuth().idToken`
  * @param ownerUid — The workshop owner UID (tenant). Pass null/undefined for
  *                   endpoints that don't require a tenant.
  */
-export function bmsApi(idToken: string | null, ownerUid?: string | null) {
-  const token = idToken ?? undefined;
+export function bmsApi(ownerUid?: string | null) {
   const tenant = ownerUid ?? undefined;
 
   /* ── Auth ── */
   const getAgent = () =>
     request<{ uid: string; name: string; role: string; assignedWorkshops: string[] }>(
       '/auth',
-      { token },
+      { tenant },
     );
 
   /* ── Workshops ── */
   const getWorkshops = () =>
-    request<BmsWorkshop[]>('/workshops', { token });
+    request<BmsWorkshop[]>('/workshops', { tenant });
 
   const getWorkshop = (uid: string) =>
-    request<BmsWorkshop>(`/workshops/${uid}`, { token });
+    request<BmsWorkshop>(`/workshops/${uid}`, { tenant });
 
   /* ── DID Lookup ── */
   const didLookup = (did: string) =>
     request<{ ownerUid: string; branchId?: string; label?: string }>(
       `/did-lookup?did=${encodeURIComponent(did)}`,
-      { token },
+      { tenant },
     );
 
   /* ── Services ── */
   const getServices = (branchId?: string) => {
     if (branchId) {
       const q = `?branchId=${encodeURIComponent(branchId)}`;
-      return request<BmsService[]>(`/services-by-branch${q}`, { token, tenant });
+      return request<BmsService[]>(`/services-by-branch${q}`, { tenant });
     }
-    return request<BmsService[]>('/services', { token, tenant });
+    return request<BmsService[]>('/services', { tenant });
   };
 
   const getService = (serviceId: string) =>
     request<BmsService & { checklist: unknown[]; branches: BmsBranch[] }>(
       `/services/${serviceId}`,
-      { token, tenant },
+      { tenant },
     );
 
   /* ── Customers ── */
   const searchCustomers = (q: string, searchBy?: 'phone' | 'email' | 'name') => {
     const params = new URLSearchParams({ q });
     if (searchBy) params.set('searchBy', searchBy);
-    return request<BmsCustomer[]>(`/customers?${params}`, { token, tenant });
+    return request<BmsCustomer[]>(`/customers?${params}`, { tenant });
   };
 
   const getCustomer = (customerId: string) =>
-    request<BmsCustomer>(`/customers/${customerId}`, { token, tenant });
+    request<BmsCustomer>(`/customers/${customerId}`, { tenant });
 
   const createCustomer = (payload: {
     ownerUid: string;
@@ -218,12 +216,12 @@ export function bmsApi(idToken: string | null, ownerUid?: string | null) {
     request<BmsCustomer>('/customers', {
       method: 'POST',
       body: JSON.stringify(payload),
-      token,
+      tenant,
     });
 
   const getCustomerVehicles = (customerId: string) =>
     request<unknown[]>(`/customers/${customerId}/vehicles?ownerUid=${tenant ?? ''}`, {
-      token,
+      tenant,
     });
 
   /* ── Bookings ── */
@@ -248,7 +246,7 @@ export function bmsApi(idToken: string | null, ownerUid?: string | null) {
     const params = new URLSearchParams({ branchId, date, serviceIds: ids });
     return request<BmsAvailabilitySlot[]>(
       `/bookings/availability?${params}`,
-      { token, tenant },
+      { tenant },
     );
   };
 
@@ -260,12 +258,11 @@ export function bmsApi(idToken: string | null, ownerUid?: string | null) {
     request<BmsBooking>('/bookings', {
       method: 'POST',
       body: JSON.stringify(payload),
-      token,
       tenant,
     });
 
   const getBooking = (bookingId: string) =>
-    request<BmsBooking>(`/bookings/${bookingId}`, { token, tenant });
+    request<BmsBooking>(`/bookings/${bookingId}`, { tenant });
 
   const listBookings = (params?: {
     status?: string;
@@ -280,14 +277,14 @@ export function bmsApi(idToken: string | null, ownerUid?: string | null) {
     if (params?.branchId) q.set('branchId', params.branchId);
     if (params?.customerId) q.set('customerId', params.customerId);
     if (params?.limit) q.set('limit', String(params.limit));
-    return request<BmsBooking[]>(`/getallbooking?${q}`, { token });
+    return request<BmsBooking[]>(`/getallbooking?${q}`, { tenant });
   };
 
   /* ── Additional Issues ── */
   const getAdditionalIssues = (bookingId: string) =>
     request<BmsAdditionalIssue[]>(
       `/bookings/${bookingId}/additional-issues`,
-      { token },
+      { tenant },
     );
 
   const respondToIssue = (
@@ -300,7 +297,7 @@ export function bmsApi(idToken: string | null, ownerUid?: string | null) {
       {
         method: 'PATCH',
         body: JSON.stringify({ customerResponse }),
-        token,
+        tenant,
       },
     );
 
@@ -309,7 +306,7 @@ export function bmsApi(idToken: string | null, ownerUid?: string | null) {
     request<{ id: string }>('/call-logs', {
       method: 'POST',
       body: JSON.stringify(payload),
-      token,
+      tenant,
     });
 
   const getCallLogs = (params?: {
@@ -321,7 +318,7 @@ export function bmsApi(idToken: string | null, ownerUid?: string | null) {
     if (params?.customerId) q.set('customerId', params.customerId);
     if (params?.bookingId) q.set('bookingId', params.bookingId);
     if (params?.limit) q.set('limit', String(params.limit));
-    return request<unknown[]>(`/call-logs?${q}`, { token });
+    return request<unknown[]>(`/call-logs?${q}`, { tenant });
   };
 
   return {

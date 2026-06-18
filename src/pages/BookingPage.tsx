@@ -27,7 +27,6 @@ import {
   type BookingServiceItem,
   type VehicleDetails,
 } from "@/services/bookingsApi";
-import { auth } from "@/lib/firebase";
 import { useAuth } from "@/hooks/useAuth";
 import { logSystemActivity } from "@/services/auditLogApi";
 import { useToast } from "@/hooks/use-toast";
@@ -1070,14 +1069,13 @@ export default function BookingPage() {
       // ── Save a local copy to Supabase with agent details ──
       try {
         const { supabase } = await import("@/integrations/supabase/client");
-        const firebaseUser = auth.currentUser;
 
         await (supabase as any).from("bms_bookings").insert({
           bms_booking_id: result.bookingId ?? null,
           owner_uid: ownerUidToUse,
           branch_id: branchId || null,
-          agent_uid: firebaseUser?.uid ?? null,
-          agent_email: firebaseUser?.email ?? null,
+          agent_uid: session?.userId ?? null,
+          agent_email: session?.authEmail ?? null,
           client_name: customerName,
           client_phone: customerPhone || null,
           client_email: sanitizedCustomerEmail || null,
@@ -1092,10 +1090,6 @@ export default function BookingPage() {
           bms_status: "Pending",
           bms_response: result,
         });
-        // console.log(
-        //   "[Supabase] Booking saved locally with agent:",
-        //   firebaseUser?.email,
-        // );
       } catch (sbErr) {
         // Don't fail the whole flow if Supabase save fails — BMS booking already created
         // console.warn("[Supabase] Failed to save local booking copy:", sbErr);
