@@ -519,14 +519,36 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
           }
         >
           {d.error && (
-            <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 sm:flex-row sm:items-center sm:justify-between">
+            <div
+              className={
+                d.isSessionExpired
+                  ? 'mb-6 flex flex-col gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 sm:flex-row sm:items-center sm:justify-between'
+                  : 'mb-6 flex flex-col gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 sm:flex-row sm:items-center sm:justify-between'
+              }
+            >
               <span className="flex items-center gap-2">
-                <AlertCircle className="h-4 w-4" />
+                <AlertCircle className="h-4 w-4 shrink-0" />
                 {d.error}
               </span>
-              <Button variant="outline" size="sm" onClick={d.refresh} className="border-rose-200 bg-white text-rose-700 hover:bg-rose-100">
-                Retry
-              </Button>
+              {d.isSessionExpired ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void onSignOut()}
+                  className="border-amber-300 bg-white text-amber-900 hover:bg-amber-100"
+                >
+                  Sign out
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={d.refresh}
+                  className="border-rose-200 bg-white text-rose-700 hover:bg-rose-100"
+                >
+                  Retry
+                </Button>
+              )}
             </div>
           )}
 

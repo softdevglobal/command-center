@@ -49,7 +49,23 @@ export const AUTH_STORAGE_KEYS = {
 
 export const AUTH_LOGOUT_EVENT = 'command-centre-auth:logout';
 export const AUTH_SESSION_EXPIRED_STORAGE_KEY = 'command-centre-auth:session-expired';
-export const AUTH_SESSION_EXPIRED_MESSAGE = 'Your auth session expired. Please logout and login.';
+export const AUTH_SESSION_EXPIRED_MESSAGE = 'Your session expired. Please sign out and sign in again.';
+
+export function isAuthSessionExpiredError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase();
+  if (!message) return false;
+
+  return (
+    message.includes('token is expired') ||
+    message.includes('jwt expired') ||
+    message.includes('session expired') ||
+    (message.includes('401') &&
+      (message.includes('invalid jwt') ||
+        message.includes('unauthorized') ||
+        message.includes('expired') ||
+        message.includes('not authenticated')))
+  );
+}
 
 export type AuthLogoutReason = 'manual' | 'session-expired';
 export type AuthLogoutEventDetail = {

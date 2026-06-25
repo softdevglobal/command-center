@@ -14,6 +14,7 @@ import {
 import { fetchAgentsList } from "@/services/agentApis";
 import { DASHBOARD_DISMISS_INCOMING_CALLER_EVENT } from "@/services/linkusCallLog";
 import { fetchAgentOnboarding } from "@/services/agentOnboardingApi";
+import { AUTH_SESSION_EXPIRED_MESSAGE, isAuthSessionExpiredError } from "@/lib/api";
 import { isValidCallerNumber } from "@/utils/formatters";
 import { 
   getAustralianDateKey, 
@@ -64,6 +65,7 @@ export interface DashboardData {
   queueIncomingLingerEndedAt: ReadonlyMap<string, number>;
   loading: boolean;
   error: string | null;
+  isSessionExpired: boolean;
   now: number;
   callDate: string;
   setCallDate: (ymd: string) => void;
@@ -648,7 +650,7 @@ export function useDashboardData({
     (needsQueues && isPendingQueues) ||
     (needsCalls && isPendingCalls);
 
-  const error =
+  const rawError =
     (
       tenantsErr ||
       agentsErr ||
@@ -659,7 +661,10 @@ export function useDashboardData({
       agentGroupsErr ||
       onboardingErr
     )?.toString() || null;
-  const connectionStatus: ConnectionStatus = error ? "disconnected" : "connected";
+
+  const isSessionExpired = rawError != null && isAuthSessionExpiredError(rawError);
+  const error = isSessionExpired ? AUTH_SESSION_EXPIRED_MESSAGE : rawError;
+  const connectionStatus: ConnectionStatus = error && !isSessionExpired ? "disconnected" : "connected";
 
   return {
     selectedTenant: effectiveTenant,
@@ -680,6 +685,7 @@ export function useDashboardData({
     queueIncomingLingerEndedAt,
     loading: isInitialLoading,
     error,
+    isSessionExpired,
     now,
     callDate,
     setCallDate,
