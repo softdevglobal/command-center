@@ -25,7 +25,7 @@ import type {
   WorkshopUserRole,
 } from "@/services/types";
 import { fetchAgentByCallerNumber } from "@/services/dashboardApi";
-import { fetchFirebaseCallerContext } from "@/services/customersApi";
+import { fetchCallerContextByPhone } from "@/services/customersApi";
 import { getDIDMappingByDid } from "@/services/didMappingsApi";
 import {
   fetchCallCenterChatMessages,
@@ -363,24 +363,24 @@ export function CallDetailsSheet({
     setMatchedAgent(null);
 
     const ownerKey = effectiveDetail.ownerId || effectiveDetail.tenantId;
-    const firebasePromise = ownerKey
-      ? fetchFirebaseCallerContext(ownerKey, effectiveDetail.customerPhone)
+    const callerContextPromise = ownerKey
+      ? fetchCallerContextByPhone(ownerKey, effectiveDetail.customerPhone)
       : Promise.resolve(null);
     const agentPromise = fetchAgentByCallerNumber(
       effectiveDetail.customerPhone,
       effectiveDetail.tenantId,
     );
 
-    Promise.allSettled([firebasePromise, agentPromise])
+    Promise.allSettled([callerContextPromise, agentPromise])
       .then((results) => {
         if (cancelled) return;
-        const [fbRes, agentRes] = results;
-        setCallerContext(fbRes.status === "fulfilled" ? fbRes.value : null);
+        const [ctxRes, agentRes] = results;
+        setCallerContext(ctxRes.status === "fulfilled" ? ctxRes.value : null);
         setMatchedAgent(agentRes.status === "fulfilled" ? agentRes.value : null);
-        const fbFail = fbRes.status === "rejected" ? fbRes.reason : null;
         const agFail = agentRes.status === "rejected" ? agentRes.reason : null;
-        if (fbFail && agFail) {
-          const err = fbFail ?? agFail;
+        const ctxFail = ctxRes.status === "rejected" ? ctxRes.reason : null;
+        if (ctxFail && agFail) {
+          const err = ctxFail ?? agFail;
           setContextError(
             err instanceof Error ? err.message : "Failed to load caller context",
           );
@@ -1157,10 +1157,10 @@ export function CallDetailsSheet({
                   </Tabs>
 
                   <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-600">
-                    Quick context: workshop vehicles and history come from Firebase
-                    bookings for this number. The command-centre agent roster in
-                    Supabase is also checked so internal or team calls match by
-                    extension or roster phone.
+                    Quick context: workshop vehicles and history come from
+                    GET /api/bms-black/bookings/by-phone for this number. The
+                    command-centre agent roster in Supabase is also checked so
+                    internal or team calls match by extension or roster phone.
                   </div>
                 </>
               )}

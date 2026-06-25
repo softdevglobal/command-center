@@ -316,6 +316,21 @@ export async function getAllBookings(): Promise<Booking[]> {
   return unwrapArray<Booking>(raw, ['bookings', 'data', 'items', 'results']);
 }
 
+/** GET /bookings/by-phone?phone=… — caller screen-pop (auth via dashboard JWT). */
+export async function getBookingsByPhone(
+  phone: string,
+  tenantId?: string | null,
+): Promise<Booking[]> {
+  const trimmed = phone.trim();
+  if (!trimmed) return [];
+
+  const raw = await bmsBlackRequest<unknown>('/bookings/by-phone', {
+    tenantId: tenantId?.trim() || undefined,
+    query: { phone: trimmed },
+  });
+  return unwrapArray<Booking>(raw, ['bookings', 'data', 'items', 'results']);
+}
+
 export function getBookingAvailability(
   params: BookingAvailabilityParams,
 ): Promise<BookingAvailabilityResponse> {

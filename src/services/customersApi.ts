@@ -1,126 +1,109 @@
-import { db } from "@/lib/firebase";
-import {
-  collection,
-  query,
-  where,
-  getDocs,
-  type DocumentData,
-} from "firebase/firestore";
-import { buildPhoneLookupVariants } from "./dashboardApi";
+import { getBookingsByPhone, type Booking } from '@/lib/bms-black-api';
+import { buildPhoneLookupVariants } from './dashboardApi';
 import type {
   CallerContext,
   CustomerRecord,
   VehicleRecord,
   ServiceRecord,
-} from "./types";
+} from './types';
 
-// ─── Main: Fetch Caller Context from Firebase ────────────────────────────────
+type RawBooking = {
+  id: string;
+  data: Record<string, unknown>;
+};
+
+function bookingToRaw(booking: Booking): RawBooking {
+  const { id, ...rest } = booking;
+  return {
+    id: String(id ?? ''),
+    data: { ...rest, id } as Record<string, unknown>,
+  };
+}
+
+function filterBookingsForOwner(bookings: RawBooking[], ownerUid: string): RawBooking[] {
+  const owner = ownerUid.trim();
+  if (!owner) return bookings;
+  return bookings.filter((b) => {
+    const docOwner = String(
+      b.data.ownerUid ?? b.data.tenantId ?? b.data.owner_uid ?? '',
+    );
+    return docOwner === owner;
+  });
+}
+
+function sortBookingsNewestFirst(bookings: RawBooking[]): void {
+  bookings.sort((a, b) => {
+    const da = String(a.data.date ?? a.data.bookingDate ?? '');
+    const db2 = String(b.data.date ?? b.data.bookingDate ?? '');
+    return db2.localeCompare(da);
+  });
+}
 
 /**
- * Look up a customer in Firebase Firestore by owner UID and phone number.
- *
- * Strategy:
- * 1. Query the root `bookings` collection by phone (all format variants).
- * 2. Filter results by ownerUid client-side (avoids composite Firestore index).
- * 3. Derive customer info, vehicles, and service history directly from those
- *    booking documents — no separate customers subcollection needed.
+ * Look up customer profile, vehicles, and service history via
+ * GET /api/bms-black/bookings/by-phone (dashboard JWT).
  */
-export async function fetchFirebaseCallerContext(
+export async function fetchCallerContextByPhone(
   ownerUid: string,
   callerNumber: string,
 ): Promise<CallerContext | null> {
   const variants = buildPhoneLookupVariants(callerNumber);
-  if (!ownerUid || variants.length === 0) return null;
+  if (!ownerUid?.trim() || variants.length === 0) return null;
 
-  const allBookings = await fetchBookingsByPhone(ownerUid, variants);
-  if (allBookings.length === 0) return null;
+  let bookings = await loadBookingsForPhone(callerNumber, ownerUid);
+  bookings = filterBookingsForOwner(bookings, ownerUid);
+  if (bookings.length === 0) return null;
 
-  // Sort descending by date — most recent booking first
-  allBookings.sort((a, b) => {
-    const da = String(a.data.date ?? a.data.bookingDate ?? "");
-    const db2 = String(b.data.date ?? b.data.bookingDate ?? "");
-    return db2.localeCompare(da);
-  });
+  sortBookingsNewestFirst(bookings);
+  return buildCallerContextFromBookings(bookings, ownerUid);
+}
 
-  // Derive customer from the most recent booking
-  const latest = allBookings[0];
+/** @deprecated Use `fetchCallerContextByPhone` — kept for existing imports. */
+export const fetchFirebaseCallerContext = fetchCallerContextByPhone;
+
+async function loadBookingsForPhone(
+  callerNumber: string,
+  tenantId?: string | null,
+): Promise<RawBooking[]> {
+  try {
+    const rows = await getBookingsByPhone(callerNumber, tenantId);
+    return rows.map(bookingToRaw).filter((b) => b.id);
+  } catch {
+    return [];
+  }
+}
+
+function buildCallerContextFromBookings(
+  bookings: RawBooking[],
+  ownerUid: string,
+): CallerContext {
+  const latest = bookings[0];
   const customer = mapBookingToCustomer(latest.id, latest.data, ownerUid);
-
-  // Derive unique vehicles by rego from all bookings
-  const vehicles = deriveVehiclesFromBookings(allBookings, ownerUid, customer.id);
-
-  // Map every booking → ServiceRecord and link to matched vehicle by rego
-  const services = allBookings
+  const vehicles = deriveVehiclesFromBookings(bookings, ownerUid, customer.id);
+  const services = bookings
     .map((b) => mapBookingToServiceRecord(b.id, b.data, vehicles))
     .filter((s) => Boolean(s.serviceType));
 
   return { customer, vehicles, services };
 }
 
-// ─── Internal: fetch all bookings for owner+phone ────────────────────────────
-
-interface RawBooking {
-  id: string;
-  data: DocumentData;
-}
-
-/**
- * Queries the root `bookings` collection for documents where a phone field
- * matches any of the given variants. Results are deduplicated and filtered
- * client-side by ownerUid to avoid composite index requirements.
- */
-async function fetchBookingsByPhone(
-  ownerUid: string,
-  variants: string[],
-): Promise<RawBooking[]> {
-  const bookingsRef = collection(db, "bookings");
-  const safeVariants = variants.slice(0, 30); // Firestore 'in' max = 30
-
-  const results = new Map<string, RawBooking>(); // keyed by doc ID to deduplicate
-
-  for (const field of ["clientPhone", "customerPhone", "phone", "contactNumber"]) {
-    try {
-      const q = query(bookingsRef, where(field, "in", safeVariants));
-      const snap = await getDocs(q);
-      if (snap.empty) continue;
-
-      for (const doc of snap.docs) {
-        const data = doc.data();
-        // Client-side ownerUid filter
-        const docOwner = String(
-          data.ownerUid ?? data.tenantId ?? data.owner_uid ?? "",
-        );
-        if (docOwner === ownerUid) {
-          results.set(doc.id, { id: doc.id, data });
-        }
-      }
-    } catch {
-      // Field doesn't exist or has no single-field index — skip silently
-    }
-  }
-
-  return Array.from(results.values());
-}
-
-// ─── Derive customer info from booking ───────────────────────────────────────
-
 function mapBookingToCustomer(
   bookingDocId: string,
-  data: DocumentData,
+  data: Record<string, unknown>,
   ownerUid: string,
 ): CustomerRecord {
   const phone = String(
-    data.clientPhone ?? data.customerPhone ?? data.phone ?? "",
+    data.clientPhone ?? data.customerPhone ?? data.phone ?? '',
   );
   const name = String(
-    data.client ?? data.clientName ?? data.customerName ?? data.name ?? "",
+    data.client ?? data.clientName ?? data.customerName ?? data.name ?? '',
   );
   return {
     id: data.customerId ? String(data.customerId) : bookingDocId,
     tenantId: ownerUid,
     name,
     primaryPhone: phone,
-    phoneNormalized: phone.replace(/\D/g, ""),
+    phoneNormalized: phone.replace(/\D/g, ''),
     email:
       data.clientEmail ?? data.customerEmail ?? data.email
         ? String(data.clientEmail ?? data.customerEmail ?? data.email)
@@ -130,23 +113,16 @@ function mapBookingToCustomer(
   };
 }
 
-// ─── Derive unique vehicles from bookings ─────────────────────────────────────
-
-/**
- * Builds a deduplicated VehicleRecord list from booking documents.
- * Each unique registration number (vehicleNumber/registrationNumber) becomes
- * one vehicle entry. No subcollection needed.
- */
 function deriveVehiclesFromBookings(
   bookings: RawBooking[],
   ownerUid: string,
   customerId: string,
 ): VehicleRecord[] {
-  const seen = new Map<string, VehicleRecord>(); // keyed by normalised rego
+  const seen = new Map<string, VehicleRecord>();
 
   for (const { data } of bookings) {
     const rawRego = String(
-      data.vehicleNumber ?? data.registrationNumber ?? data.vehicleRego ?? "",
+      data.vehicleNumber ?? data.registrationNumber ?? data.vehicleRego ?? '',
     ).trim();
     if (!rawRego) continue;
 
@@ -158,8 +134,8 @@ function deriveVehiclesFromBookings(
       tenantId: ownerUid,
       customerId,
       rego: rawRego,
-      make: String(data.vehicleMake ?? data.make ?? ""),
-      model: String(data.vehicleModel ?? data.model ?? ""),
+      make: String(data.vehicleMake ?? data.make ?? ''),
+      model: String(data.vehicleModel ?? data.model ?? ''),
       year: data.vehicleYear ? Number(data.vehicleYear) : null,
       color:
         data.vehicleColor ?? data.colour
@@ -176,15 +152,13 @@ function deriveVehiclesFromBookings(
   return Array.from(seen.values());
 }
 
-// ─── Map booking → ServiceRecord ─────────────────────────────────────────────
-
 function mapBookingToServiceRecord(
   docId: string,
-  data: DocumentData,
+  data: Record<string, unknown>,
   vehicles: VehicleRecord[],
 ): ServiceRecord {
   const rawRego = String(
-    data.vehicleNumber ?? data.registrationNumber ?? data.vehicleRego ?? "",
+    data.vehicleNumber ?? data.registrationNumber ?? data.vehicleRego ?? '',
   ).toLowerCase();
   const matchedVehicle = vehicles.find(
     (v) => v.rego && v.rego.toLowerCase() === rawRego,
@@ -192,28 +166,29 @@ function mapBookingToServiceRecord(
 
   const serviceNames = Array.isArray(data.services)
     ? data.services
-        .map((s: Record<string, unknown>) =>
-          String(s.serviceName ?? s.name ?? ""),
-        )
+        .map((s) => {
+          const row = s as Record<string, unknown>;
+          return String(row.serviceName ?? row.name ?? '');
+        })
         .filter(Boolean)
-        .join(", ")
-    : String(data.serviceType ?? data.service ?? "General Service");
+        .join(', ')
+    : String(data.serviceType ?? data.service ?? 'General Service');
 
   const totalAmount = Array.isArray(data.services)
-    ? data.services.reduce(
-        (sum: number, s: Record<string, unknown>) => sum + Number(s.price ?? 0),
-        0,
-      )
+    ? data.services.reduce((sum: number, s) => {
+        const row = s as Record<string, unknown>;
+        return sum + Number(row.price ?? 0);
+      }, 0)
     : data.totalPrice
       ? Number(data.totalPrice)
       : null;
 
   return {
     id: docId,
-    tenantId: String(data.ownerUid ?? data.tenantId ?? ""),
-    customerId: String(data.customerId ?? ""),
-    vehicleId: matchedVehicle?.id ?? "",
-    serviceDate: String(data.date ?? data.bookingDate ?? ""),
+    tenantId: String(data.ownerUid ?? data.tenantId ?? ''),
+    customerId: String(data.customerId ?? ''),
+    vehicleId: matchedVehicle?.id ?? '',
+    serviceDate: String(data.date ?? data.bookingDate ?? ''),
     serviceType: serviceNames,
     odometerKm: data.mileage ? Number(data.mileage) : null,
     amount: totalAmount,
@@ -221,106 +196,34 @@ function mapBookingToServiceRecord(
   };
 }
 
-// ─── Lightweight name-only lookup (for batch/table use) ──────────────────────
-
 /**
- * Look up just the customer name from Firebase bookings by owner UID and phone.
- * Much cheaper than fetchFirebaseCallerContext — skips vehicles & service history.
+ * Lightweight name lookup for queue cards — uses GET /bookings/by-phone.
  */
 export async function fetchCallerNameByPhone(
   _ownerUid: string,
   callerNumber: string,
 ): Promise<string | null> {
   const variants = buildPhoneLookupVariants(callerNumber);
-  if (variants.length === 0) {
-    // console.warn("[CallerName] Skipped — no phone variants", { callerNumber });
-    return null;
-  }
+  if (variants.length === 0) return null;
 
-  // console.log("[CallerName] Looking up", {
-  //   callerNumber,
-  //   variantCount: variants.length,
-  // });
   try {
-    // For name-only lookups we query by phone number alone (no ownerUid filter).
-    // The ownerUid passed from CallsTab is typically a Supabase tenant ID
-    // (e.g. "t-xxx") which doesn't match the Firebase document's ownerUid field,
-    // so filtering by it would return zero results. The phone number is sufficient
-    // to identify the customer for display-name purposes.
-    const bookings = await fetchBookingsByPhoneOnly(variants);
-    if (bookings.length === 0) {
-      // console.log("[CallerName] Result:", { callerNumber, name: "(no bookings)" });
-      return null;
-    }
+    const bookings = (await loadBookingsForPhone(callerNumber)).map((b) => b.data);
+    if (bookings.length === 0) return null;
 
-    // Sort descending by date — most recent booking first
     bookings.sort((a, b) => {
-      const da = String(a.data.date ?? a.data.bookingDate ?? "");
-      const db2 = String(b.data.date ?? b.data.bookingDate ?? "");
+      const da = String(a.date ?? a.bookingDate ?? '');
+      const db2 = String(b.date ?? b.bookingDate ?? '');
       return db2.localeCompare(da);
     });
 
-    // Find the first booking that has a valid name
-    const bookingWithName = bookings.find((b) => {
-      const d = b.data;
-      const n = String(
-        d.client ?? d.clientName ?? d.customerName ?? d.name ?? "",
+    for (const data of bookings) {
+      const name = String(
+        data.client ?? data.clientName ?? data.customerName ?? data.name ?? '',
       ).trim();
-      return n.length > 0;
-    });
-
-    if (!bookingWithName) {
-      // console.log("[CallerName] Result:", {
-      //   callerNumber,
-      //   name: "(not found)",
-      // });
-      return null;
+      if (name) return name;
     }
-
-    const data = bookingWithName.data;
-    const name = String(
-      data.client ?? data.clientName ?? data.customerName ?? data.name ?? "",
-    ).trim();
-
-    // console.log("[CallerName] Result:", {
-    //   callerNumber,
-    //   name,
-    // });
-    return name;
+    return null;
   } catch {
-    // console.error("[CallerName] Error:", err);
     return null;
   }
-}
-
-// ─── Phone-only booking lookup (no ownerUid filter) ──────────────────────────
-
-/**
- * Queries the root `bookings` collection for documents where a phone field
- * matches any of the given variants. No ownerUid filtering — used for
- * lightweight name resolution where the phone number alone is sufficient.
- */
-async function fetchBookingsByPhoneOnly(
-  variants: string[],
-): Promise<RawBooking[]> {
-  const bookingsRef = collection(db, "bookings");
-  const safeVariants = variants.slice(0, 30); // Firestore 'in' max = 30
-
-  const results = new Map<string, RawBooking>(); // keyed by doc ID to deduplicate
-
-  for (const field of ["clientPhone", "customerPhone", "phone", "contactNumber"]) {
-    try {
-      const q = query(bookingsRef, where(field, "in", safeVariants));
-      const snap = await getDocs(q);
-      if (snap.empty) continue;
-
-      for (const doc of snap.docs) {
-        results.set(doc.id, { id: doc.id, data: doc.data() });
-      }
-    } catch {
-      // Field doesn't exist or has no single-field index — skip silently
-    }
-  }
-
-  return Array.from(results.values());
 }

@@ -24,6 +24,9 @@ export interface MeResponse {
   agentType: string;
 }
 
+/** Fallback when login response omits expiry fields; must match backend JWT TTL. */
+export const DEFAULT_ACCESS_TOKEN_TTL_SEC = 4 * 60 * 60;
+
 export const DEFAULT_API_BASE = '/api';
 
 export const API_BASE =
@@ -38,6 +41,7 @@ export function apiUrl(path = ''): string {
 export const AUTH_STORAGE_KEYS = {
   accessToken: 'access_token',
   refreshToken: 'refresh_token',
+  expiresAt: 'token_expires_at',
   user: 'user',
   roles: 'roles',
   agentType: 'agentType',
@@ -100,9 +104,23 @@ export function getAccessToken(): string | null {
   return localStorage.getItem(AUTH_STORAGE_KEYS.accessToken);
 }
 
-function storeAuthTokens(accessToken: string, refreshToken: string): void {
+function storeAuthTokens(
+  accessToken: string,
+  refreshToken: string,
+  expiresAt?: number | null,
+): void {
   localStorage.setItem(AUTH_STORAGE_KEYS.accessToken, accessToken);
   localStorage.setItem(AUTH_STORAGE_KEYS.refreshToken, refreshToken);
+  if (expiresAt != null && Number.isFinite(expiresAt)) {
+    localStorage.setItem(AUTH_STORAGE_KEYS.expiresAt, String(expiresAt));
+  }
+}
+
+function resolveExpiresAt(response: Pick<LoginResponse, 'expires_at' | 'expires_in'>): number {
+  if (response.expires_at != null && Number.isFinite(response.expires_at)) {
+    return response.expires_at;
+  }
+  return Math.floor(Date.now() / 1000) + (response.expires_in ?? DEFAULT_ACCESS_TOKEN_TTL_SEC);
 }
 
 export function getStoredUser(): LoginResponse['user'] | null {
@@ -119,7 +137,11 @@ export function getStoredAgentType(): string | null {
 }
 
 export function storeAuthSession(response: LoginResponse): void {
-  storeAuthTokens(response.access_token, response.refresh_token);
+  storeAuthTokens(
+    response.access_token,
+    response.refresh_token,
+    resolveExpiresAt(response),
+  );
   localStorage.setItem(AUTH_STORAGE_KEYS.user, JSON.stringify(response.user));
   localStorage.setItem(AUTH_STORAGE_KEYS.roles, JSON.stringify(response.roles ?? []));
   localStorage.setItem(AUTH_STORAGE_KEYS.agentType, response.agentType ?? '');
@@ -144,15 +166,48 @@ export async function syncSupabaseAuthSession(
 }
 
 async function refreshStoredAuthSession(): Promise<boolean> {
-  const { data, error } = await supabase.auth.getSession();
+  const refreshToken = localStorage.getItem(AUTH_STORAGE_KEYS.refreshToken);
+  if (!refreshToken) return false;
+
+  const { data, error } = await supabase.auth.refreshSession({ refresh_token: refreshToken });
   const session = data.session;
   if (error || !session?.access_token || !session.refresh_token) {
     return false;
   }
 
-  storeAuthTokens(session.access_token, session.refresh_token);
+  storeAuthTokens(session.access_token, session.refresh_token, session.expires_at);
   return true;
 }
+
+async function ensureFreshAccessToken(): Promise<void> {
+  if (!getAccessToken()) return;
+
+  const expiresAtRaw = localStorage.getItem(AUTH_STORAGE_KEYS.expiresAt);
+  if (!expiresAtRaw) return;
+
+  const expiresAt = Number(expiresAtRaw);
+  if (!Number.isFinite(expiresAt)) return;
+
+  // Refresh proactively when the access token is within 60s of expiry.
+  if (expiresAt * 1000 > Date.now() + 60_000) return;
+
+  await refreshStoredAuthSession();
+}
+
+let authTokenSyncInitialized = false;
+
+function initAuthTokenSync(): void {
+  if (authTokenSyncInitialized) return;
+  authTokenSyncInitialized = true;
+
+  supabase.auth.onAuthStateChange((_event, session) => {
+    if (session?.access_token && session.refresh_token) {
+      storeAuthTokens(session.access_token, session.refresh_token, session.expires_at);
+    }
+  });
+}
+
+initAuthTokenSync();
 
 export function clearAuthStorage(): void {
   Object.values(AUTH_STORAGE_KEYS).forEach((key) => localStorage.removeItem(key));
@@ -247,6 +302,9 @@ export function logout(
 
 export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}): Promise<Response> {
   const { logoutOnUnauthorized = false, ...fetchInit } = init;
+
+  await ensureFreshAccessToken();
+
   const headers = new Headers(init.headers);
   const token = getAccessToken();
   if (token && !headers.has('Authorization')) {
@@ -264,7 +322,7 @@ export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}
     if (refreshed) {
       const retryHeaders = new Headers(fetchInit.headers);
       const refreshedToken = getAccessToken();
-      if (refreshedToken && !retryHeaders.has('Authorization')) {
+      if (refreshedToken) {
         retryHeaders.set('Authorization', `Bearer ${refreshedToken}`);
       }
       res = await fetch(url, { ...fetchInit, headers: retryHeaders });

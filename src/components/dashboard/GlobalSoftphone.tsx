@@ -1,6 +1,5 @@
 import { useMemo, useEffect } from 'react';
 import { useDashboard } from '@/context/DashboardDataContext';
-import { useFirebaseAuth } from '@/integrations/firebase/useFirebaseAuth';
 import { SoftphoneWidget } from '@/components/dashboard/SoftphoneWidget';
 import { UserSession } from '@/services/types';
 import { cacheAgentSession, SoftphoneCallLogContext } from '@/services/linkusCallLog';
@@ -11,7 +10,6 @@ interface GlobalSoftphoneProps {
 
 export function GlobalSoftphone({ session }: GlobalSoftphoneProps) {
   const d = useDashboard();
-  const { firebaseUser } = useFirebaseAuth();
 
   const adminExtEmail = (import.meta.env.VITE_YEASTAR_ADMIN_EMAIL as string | undefined)?.trim();
 
@@ -20,13 +18,12 @@ export function GlobalSoftphone({ session }: GlobalSoftphoneProps) {
       const currentAgent = d.agents.find((a) => a.userId === session.userId);
       const fromRoster = (currentAgent?.email ?? '').trim();
       const fromSession = (session.authEmail ?? '').trim();
-      const fromFirebase = (firebaseUser?.email ?? '').trim();
-      return fromRoster || fromSession || fromFirebase || null;
+      return fromRoster || fromSession || null;
     } else if (session.role === 'super-admin') {
-      return adminExtEmail || firebaseUser?.email || null;
+      return adminExtEmail || session.authEmail || null;
     }
     return null;
-  }, [session, d.agents, firebaseUser, adminExtEmail]);
+  }, [session, d.agents, adminExtEmail]);
 
   const softphoneCallLogContext = useMemo((): SoftphoneCallLogContext | null => {
     if (!softphoneEmail) return null;

@@ -16,7 +16,6 @@ import { useNavigate } from 'react-router-dom';
 import type { TenantOnboarding, NewClientForm, UserSession, Permissions } from '@/services/types';
 import { useDashboard } from '@/context/DashboardDataContext';
 import { useLiveClock } from '@/hooks/useLiveClock';
-import { useFirebaseAuth } from '@/integrations/firebase/useFirebaseAuth';
 import { DashboardHeader } from '@/components/dashboard/DashboardHeader';
 import { AgentNavAttendanceActions } from '@/components/dashboard/AgentNavAttendanceActions';
 import { AgentAttendanceTodayProvider } from '@/context/AgentAttendanceTodayContext';
@@ -138,7 +137,6 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
   const queryClient = useQueryClient();
   const setDashboardTab = d.setSelectedTab;
   const { formattedDate: clockDate, formattedTime: clockTime } = useLiveClock();
-  const { firebaseUser } = useFirebaseAuth();
   const [clients, setClients] = useState<TenantOnboarding[]>([]);
   const navigate = useNavigate();
 

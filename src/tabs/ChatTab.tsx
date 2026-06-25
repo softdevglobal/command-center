@@ -34,7 +34,6 @@ import {
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import type { Permissions, UserSession } from '@/services/types';
-import { useFirebaseAuth } from '@/integrations/firebase/useFirebaseAuth';
 import {
   fetchConversations,
   fetchConversationMessages,
@@ -135,13 +134,12 @@ function parseBackendDateTime(value: string): Date | null {
 function isLastMessageFromCustomer(
   conv: Conversation,
   sessionUserId: string,
-  firebaseUid: string | null | undefined,
 ): boolean {
   const ls = conv.lastSender?.trim().toLowerCase();
   if (ls === 'customer') return true;
   if (ls === 'agent') return false;
   const aid = conv.agentId?.trim();
-  if (aid && conv.lastMessage && sessionUserId.trim() !== aid && firebaseUid?.trim() !== aid) {
+  if (aid && conv.lastMessage && sessionUserId.trim() !== aid) {
     return true;
   }
   return true;
@@ -155,7 +153,6 @@ export function ChatTab({
   onInboxStatsChange,
   internalUnreadCount = 0,
 }: ChatTabProps) {
-  const { firebaseUser } = useFirebaseAuth();
   const { pendingInternalChatAgentId } = useDashboard();
 
   const [queue, setQueue] = useState<Conversation[]>([]);
@@ -356,7 +353,7 @@ export function ChatTab({
         break;
       }
       if (oldLast !== c.lastMessageAt) {
-        if (isLastMessageFromCustomer(c, session.userId, firebaseUser?.uid)) {
+        if (isLastMessageFromCustomer(c, session.userId)) {
           void playNewMessageChime();
           played = true;
         }
@@ -364,7 +361,7 @@ export function ChatTab({
     }
 
     prevInboxSnapshotRef.current = nextMap;
-  }, [allConversations, loading, session.userId, firebaseUser?.uid]);
+  }, [allConversations, loading, session.userId]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -459,7 +456,7 @@ export function ChatTab({
     return () => {
       cancelled = true;
     };
-  }, [selectedId, loadConversations, session, firebaseUser?.uid]);
+  }, [selectedId, loadConversations, session]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -554,8 +551,7 @@ export function ChatTab({
         if (CUSTOMER_SENDER_ROLES.has(role)) return false;
       }
 
-      const uid = firebaseUser?.uid?.trim() ?? '';
-      if (m.senderId === session.userId || (!!uid && m.senderId === uid)) return true;
+      if (m.senderId === session.userId) return true;
       const aid = selectedConversation?.agentId?.trim();
       if (!!aid && m.senderId === aid) return true;
 
@@ -581,7 +577,6 @@ export function ChatTab({
     },
     [
       session.userId,
-      firebaseUser?.uid,
       selectedConversation?.agentId,
       selectedConversation?.userId,
       selectedConversation?.ownerUid,
@@ -768,10 +763,9 @@ export function ChatTab({
       setDraft('');
 
       if (created) {
-        const uid = firebaseUser?.uid?.trim() ?? '';
         const msg = {
           ...created,
-          senderId: created.senderId?.trim() || uid || session.userId,
+          senderId: created.senderId?.trim() || session.userId,
           senderRole: created.senderRole?.trim() || 'agent',
         };
 

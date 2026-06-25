@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import { useFirebaseAuth } from '@/integrations/firebase/useFirebaseAuth';
+import { useAuth } from '@/hooks/useAuth';
 import {
   bmsApi,
   type BmsCustomer,
@@ -30,7 +30,7 @@ interface CreateBookingState {
  *   const result = await create({ branchId, date, time, services, client, clientPhone, ... });
  */
 export function useCreateBooking({ ownerUid }: UseCreateBookingOptions) {
-  const { idToken, firebaseUser } = useFirebaseAuth();
+  const { session } = useAuth();
   const [state, setState] = useState<CreateBookingState>({
     loading: false,
     error: null,
@@ -41,20 +41,18 @@ export function useCreateBooking({ ownerUid }: UseCreateBookingOptions) {
     async (payload: Omit<CreateBookingPayload, 'ownerUid'>): Promise<BmsBooking | null> => {
       setState({ loading: true, error: null, booking: null });
       try {
-        // 1. Create booking in BMS
-        const api = bmsApi(idToken, ownerUid);
+        const api = bmsApi(ownerUid);
         const result = await api.createBooking({ ...payload, ownerUid });
         setState({ loading: false, error: null, booking: result });
 
-        // 2. Save a local copy to Supabase with agent details
         try {
           const { supabase } = await import('@/integrations/supabase/client');
           await (supabase as any).from('bms_bookings').insert({
             bms_booking_id: result.id ?? null,
             owner_uid: ownerUid,
             branch_id: payload.branchId ?? null,
-            agent_uid: firebaseUser?.uid ?? null,
-            agent_email: firebaseUser?.email ?? null,
+            agent_uid: session?.userId ?? null,
+            agent_email: session?.authEmail ?? null,
             client_name: payload.client,
             client_phone: payload.clientPhone ?? null,
             client_email: payload.clientEmail ?? null,
@@ -69,10 +67,8 @@ export function useCreateBooking({ ownerUid }: UseCreateBookingOptions) {
             bms_status: result.status ?? 'Pending',
             bms_response: result,
           });
-          // console.log('[Supabase] Booking saved locally with agent:', firebaseUser?.email);
         } catch {
           // Don't fail the whole flow if Supabase save fails — BMS booking already created
-          // console.warn('[Supabase] Failed to save local booking copy:', sbErr);
         }
 
         return result;
@@ -82,7 +78,7 @@ export function useCreateBooking({ ownerUid }: UseCreateBookingOptions) {
         return null;
       }
     },
-    [idToken, ownerUid, firebaseUser],
+    [ownerUid, session?.authEmail, session?.userId],
   );
 
   return { ...state, create };
@@ -114,24 +110,22 @@ export function useAvailability({
   date,
   serviceIds,
 }: UseAvailabilityOptions) {
-  const { idToken } = useFirebaseAuth();
   const [slots, setSlots] = useState<{ time: string; available: boolean }[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Keep refs so the refetch closure always sees the latest values
-  const refs = useRef({ branchId, date, serviceIds, idToken, ownerUid });
-  refs.current = { branchId, date, serviceIds, idToken, ownerUid };
+  const refs = useRef({ branchId, date, serviceIds, ownerUid });
+  refs.current = { branchId, date, serviceIds, ownerUid };
 
   const refetch = useCallback(async () => {
-    const { branchId, date, serviceIds, idToken, ownerUid } = refs.current;
+    const { branchId, date, serviceIds, ownerUid } = refs.current;
     if (!branchId || !date || serviceIds.length === 0) return;
 
     setSlots([]);
     setLoading(true);
     setError(null);
     try {
-      const api = bmsApi(idToken, ownerUid);
+      const api = bmsApi(ownerUid);
       const result = await api.getAvailability({ branchId, date, serviceIds });
       setSlots(result);
     } catch (err) {
@@ -139,7 +133,7 @@ export function useAvailability({
     } finally {
       setLoading(false);
     }
-  }, []); // stable — uses ref for all deps
+  }, []);
 
   return { slots, loading, error, refetch };
 }
@@ -163,20 +157,19 @@ export function useBmsServices({
   ownerUid: string;
   branchId?: string;
 }) {
-  const { idToken } = useFirebaseAuth();
   const [services, setServices] = useState<BmsService[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refs = useRef({ idToken, ownerUid, branchId });
-  refs.current = { idToken, ownerUid, branchId };
+  const refs = useRef({ ownerUid, branchId });
+  refs.current = { ownerUid, branchId };
 
   const refetch = useCallback(async () => {
-    const { idToken, ownerUid, branchId } = refs.current;
+    const { ownerUid, branchId } = refs.current;
     setLoading(true);
     setError(null);
     try {
-      const api = bmsApi(idToken, ownerUid);
+      const api = bmsApi(ownerUid);
       const result = await api.getServices(branchId);
       setServices(result);
     } catch (err) {
@@ -184,7 +177,7 @@ export function useBmsServices({
     } finally {
       setLoading(false);
     }
-  }, []); // stable
+  }, []);
 
   return { services, loading, error, refetch };
 }
@@ -202,22 +195,21 @@ export function useBmsServices({
  *   await search(callerPhone, 'phone');
  */
 export function useCustomerSearch({ ownerUid }: { ownerUid: string }) {
-  const { idToken } = useFirebaseAuth();
   const [results, setResults] = useState<BmsCustomer[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refs = useRef({ idToken, ownerUid });
-  refs.current = { idToken, ownerUid };
+  const refs = useRef({ ownerUid });
+  refs.current = { ownerUid };
 
   const search = useCallback(
     async (query: string, by: 'phone' | 'email' | 'name' = 'phone') => {
       if (!query.trim()) return;
-      const { idToken, ownerUid } = refs.current;
+      const { ownerUid } = refs.current;
       setLoading(true);
       setError(null);
       try {
-        const api = bmsApi(idToken, ownerUid);
+        const api = bmsApi(ownerUid);
         const data = await api.searchCustomers(query, by);
         setResults(data);
       } catch (err) {
@@ -227,7 +219,7 @@ export function useCustomerSearch({ ownerUid }: { ownerUid: string }) {
       }
     },
     [],
-  ); // stable
+  );
 
   const clear = useCallback(() => setResults([]), []);
 
@@ -246,13 +238,12 @@ export function useCustomerSearch({ ownerUid }: { ownerUid: string }) {
  *   await refetch({ status: 'Pending', date: '2026-04-10' });
  */
 export function useBookingList({ ownerUid }: { ownerUid: string }) {
-  const { idToken } = useFirebaseAuth();
   const [bookings, setBookings] = useState<BmsBooking[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const refs = useRef({ idToken, ownerUid });
-  refs.current = { idToken, ownerUid };
+  const refs = useRef({ ownerUid });
+  refs.current = { ownerUid };
 
   const refetch = useCallback(
     async (params?: {
@@ -262,11 +253,11 @@ export function useBookingList({ ownerUid }: { ownerUid: string }) {
       customerId?: string;
       limit?: number;
     }) => {
-      const { idToken, ownerUid } = refs.current;
+      const { ownerUid } = refs.current;
       setLoading(true);
       setError(null);
       try {
-        const api = bmsApi(idToken, ownerUid);
+        const api = bmsApi(ownerUid);
         const data = await api.listBookings(params);
         setBookings(data);
       } catch (err) {

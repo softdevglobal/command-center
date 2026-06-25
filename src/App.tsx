@@ -3,7 +3,6 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { FirebaseAuthProvider } from "@/integrations/firebase/FirebaseAuthProvider";
 import { AuthProvider } from "@/context/AuthContext";
 import { AuthSessionExpiredNotice } from "@/components/AuthSessionExpiredNotice";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
@@ -24,11 +23,10 @@ const queryClient = new QueryClient({
 import { AppProviders } from "./components/AppProviders";
 
 const App = () => (
-  <FirebaseAuthProvider>
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider>
-        <BrowserRouter>
-          <AuthProvider>
+  <QueryClientProvider client={queryClient}>
+    <TooltipProvider>
+      <BrowserRouter>
+        <AuthProvider>
             <Toaster />
             <AuthSessionExpiredNotice />
             <Sonner />
@@ -56,11 +54,10 @@ const App = () => (
               {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
               <Route path="*" element={<NotFound />} />
             </Routes>
-          </AuthProvider>
-        </BrowserRouter>
-      </TooltipProvider>
-    </QueryClientProvider>
-  </FirebaseAuthProvider>
+        </AuthProvider>
+      </BrowserRouter>
+    </TooltipProvider>
+  </QueryClientProvider>
 );
 
 export default App;
