@@ -4,6 +4,14 @@ import { Eye, EyeOff } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '@/hooks/useAuth';
 
+const commandCentreLogo = (
+  <img
+    src="/cc.png"
+    alt="Command Centre"
+    className="h-10 w-10 shrink-0 rounded-xl object-contain shadow-lg"
+  />
+);
+
 function dashboardPathForRoles(roles: string[]): string {
   const normalized = roles.map((role) => role.trim().toLowerCase().replace(/_/g, '-'));
   if (normalized.some((role) => role === 'super-admin' || role === 'admin')) {
@@ -93,9 +101,7 @@ export default function LoginPage() {
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-black/50" />
         <div className="relative z-10">
           <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 rounded-xl bg-neutral-800 flex items-center justify-center text-white font-bold text-sm shadow-lg">
-              CC
-            </div>
+            {commandCentreLogo}
             <div>
               <span className="text-white font-bold text-lg tracking-tight">Command Centre</span>
               <span className="text-neutral-500 text-[10px] font-semibold tracking-[0.3em] uppercase ml-2">
@@ -128,9 +134,7 @@ export default function LoginPage() {
         >
           {/* Logo */}
           <div className="flex items-center gap-3 mb-auto">
-            <div className="w-10 h-10 rounded-xl bg-neutral-800 flex items-center justify-center text-white font-bold text-sm">
-              CC
-            </div>
+            {commandCentreLogo}
             <div>
               <span className="text-white font-bold text-lg tracking-tight">Command Centre</span>
               <span className="text-neutral-500 text-[10px] font-semibold tracking-[0.3em] uppercase ml-2">

@@ -258,7 +258,7 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
   }
 
   return (
-    <div className="space-y-4">
+    <div className="w-full space-y-4">
       <div className="flex items-center space-x-2">
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -271,17 +271,17 @@ export function AgentShiftScheduleBoard({ agents }: AgentShiftScheduleBoardProps
         </div>
       </div>
 
-      <div className="rounded-xl border border-slate-200 overflow-hidden shadow-sm bg-white">
-        <Table>
+      <div className="w-full rounded-xl border border-slate-200 overflow-x-auto shadow-sm bg-white">
+        <Table className="w-full min-w-[1200px] table-fixed">
           <TableHeader className="bg-slate-50/50">
             <TableRow>
-              <TableHead className="w-[180px] text-slate-600 font-semibold">Agent</TableHead>
+              <TableHead className="w-[14%] text-slate-600 font-semibold">Agent</TableHead>
               {DAYS.map((day) => (
-                <TableHead key={day} className="capitalize min-w-[130px] text-slate-600 font-semibold">
+                <TableHead key={day} className="w-[11%] capitalize text-slate-600 font-semibold">
                   {day}
                 </TableHead>
               ))}
-              <TableHead className="w-[80px] text-right text-slate-600 font-semibold">Sync</TableHead>
+              <TableHead className="w-[9%] text-right text-slate-600 font-semibold">Sync</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
