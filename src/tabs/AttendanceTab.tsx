@@ -46,7 +46,7 @@ export function AttendanceTab({
     }
     if (section === "shift-schedule") {
       return (
-        <div className="cc-fade-in mx-auto max-w-7xl space-y-6">
+        <div className="cc-fade-in w-full space-y-6">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Shift schedule</h1>
             <p className="mt-1 text-sm text-muted-foreground">
