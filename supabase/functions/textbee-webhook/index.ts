@@ -32,9 +32,9 @@ import {
 
 
 
+// Provider-to-provider webhook: no browser ever calls it, so no origin is
+// allowed. Advertising CORS here would only widen the surface.
 const corsHeaders = {
-
-  "Access-Control-Allow-Origin": "*",
 
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 

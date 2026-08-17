@@ -1,22 +1,17 @@
 // Supabase Edge Function: yeastar-api proxy
-// Solves CORS and hides PBX credentials from the browser.
+// Hides PBX credentials from the browser. The proxy holds privileged PBX
+// credentials, so callers must present a valid dashboard session and may only
+// reach the PBX Open API surface.
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-}
+import { corsHeadersFor, preflightResponse } from '../_shared/cors.ts'
+import { resolveCaller } from '../_shared/auth.ts'
 
 const OPENAPI = '/openapi/v1.0'
 
-type PbxCred = { id: string; key: string; label: string }
+/** Never proxy arbitrary PBX paths — the dashboard only uses Open API routes. */
+const ALLOWED_ENDPOINT_PREFIX = '/openapi/'
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-  })
-}
+type PbxCred = { id: string; key: string; label: string }
 
 function listPbxCredentials(): PbxCred[] {
   const pairs: [string, string, string][] = [
@@ -223,18 +218,31 @@ async function streamRecordingWithCredentialRotation(
   })
 }
 
-function audioResponseFromUpstream(upstream: Response): Response {
-  const rawCt = upstream.headers.get('content-type') || ''
-  const out = new Headers(corsHeaders)
-  if (rawCt) out.set('Content-Type', rawCt)
-  const cl = upstream.headers.get('content-length')
-  if (cl) out.set('Content-Length', cl)
-  return new Response(upstream.body, { status: upstream.status, headers: out })
-}
-
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req, 'POST, GET, OPTIONS')
+
+  const jsonResponse = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+
+  const audioResponseFromUpstream = (upstream: Response): Response => {
+    const rawCt = upstream.headers.get('content-type') || ''
+    const out = new Headers(corsHeaders)
+    if (rawCt) out.set('Content-Type', rawCt)
+    const cl = upstream.headers.get('content-length')
+    if (cl) out.set('Content-Length', cl)
+    return new Response(upstream.body, { status: upstream.status, headers: out })
+  }
+
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+    return preflightResponse(req, 'POST, GET, OPTIONS')
+  }
+
+  const caller = await resolveCaller(req)
+  if (!caller) {
+    return jsonResponse({ error: 'Unauthorized' }, 401)
   }
 
   try {
@@ -381,11 +389,16 @@ Deno.serve(async (req) => {
 
     const { endpoint, method, body, params, headers: customHeaders } = bodyData
 
-    if (!endpoint) {
+    if (!endpoint || typeof endpoint !== 'string') {
       return jsonResponse({ error: 'Missing endpoint' }, 400)
     }
 
     const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`
+
+    if (!path.startsWith(ALLOWED_ENDPOINT_PREFIX) || path.includes('..')) {
+      console.warn(`[yeastar-api] Rejected endpoint from ${caller.id}: ${path.slice(0, 120)}`)
+      return jsonResponse({ error: 'Endpoint not allowed' }, 403)
+    }
     let finalUrl = `${pbxBase}${path}`
 
     if (params) {

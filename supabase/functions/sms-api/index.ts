@@ -9,13 +9,10 @@ declare const Deno: {
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { syncInboundFromTextBee } from "../_shared/textbeeInbound.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-  "Access-Control-Max-Age": "86400",
-};
+import { baseCorsHeaders, serveWithCors } from "../_shared/cors.ts";
+
+const ALLOWED_METHODS = "GET, POST, PATCH, DELETE, OPTIONS";
+const corsHeaders = baseCorsHeaders(ALLOWED_METHODS);
 
 const SMS_CHANNEL = "sms-center";
 const ALLOWED_ROLES = new Set(["super-admin", "supervisor", "agent"]);
@@ -1041,11 +1038,7 @@ async function handleRestRequest(
   return json({ error: "Not found" }, 404);
 }
 
-Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response("ok", { status: 200, headers: corsHeaders });
-  }
-
+Deno.serve(serveWithCors(async (req) => {
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
   const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey);
@@ -1080,4 +1073,4 @@ Deno.serve(async (req) => {
     console.error("[sms-api] failed", error);
     return json({ error: error instanceof Error ? error.message : "SMS API failed" }, 500);
   }
-});
+}, ALLOWED_METHODS));

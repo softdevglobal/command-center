@@ -14,6 +14,8 @@ import TradeInspectionRequestsPage from "./pages/TradeInspectionRequestsPage.tsx
 import TradeInspectionRequestCreatePage from "./pages/TradeInspectionRequestCreatePage.tsx";
 import NotFound from "./pages/NotFound.tsx";
 
+import { AppProviders } from "./components/AppProviders";
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -21,8 +23,6 @@ const queryClient = new QueryClient({
     },
   },
 });
-
-import { AppProviders } from "./components/AppProviders";
 
 const App = () => (
   <QueryClientProvider client={queryClient}>

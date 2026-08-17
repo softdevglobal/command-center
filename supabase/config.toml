@@ -1,16 +1,29 @@
 project_id = "kcmopdntriyepywgphfz"
 
+# Functions below verify the caller in-function (session JWT + role check), so the
+# gateway check is redundant for them but harmless where enabled.
+
 [functions.create-user]
 verify_jwt = false
 
 [functions.create-agent]
 verify_jwt = false
 
+# Signed provider callbacks — no user session exists, so the gateway check must
+# stay off. Each verifies its own shared-secret header instead.
 [functions.yeastar-webhook]
 verify_jwt = false
 
 [functions.textbee-webhook]
 verify_jwt = false
 
+# Browser-called functions holding privileged upstream credentials: require a
+# valid JWT at the gateway as well as the in-function session/role check.
 [functions.get-sdk-sign]
-verify_jwt = false
+verify_jwt = true
+
+[functions.yeastar-api]
+verify_jwt = true
+
+[functions.sms-api]
+verify_jwt = true

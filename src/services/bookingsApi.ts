@@ -3,8 +3,8 @@ import {
   BMS_BLACK_API_URL,
   bmsBlackFetch,
   bmsBlackHeaders,
-} from '@/services/bmsBlackApi';
-import { getAllBookings as getBlackAllBookings } from '@/lib/bms-black-api';
+  getAllBookings as getBlackAllBookings,
+} from '@/lib/bms-black-api';
 import type { UserRole } from '@/services/types';
 import { getServiceById } from '@/services/servicesApi';
 

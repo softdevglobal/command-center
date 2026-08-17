@@ -33,6 +33,11 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+import {
+  BLUE_SUPPORT_CHAT_ENABLED,
+  defaultSupportChatProduct,
+  type SupportChatAccess,
+} from '@/lib/queueKind';
 import type { Permissions, UserSession } from '@/services/types';
 import {
   fetchConversations,
@@ -52,6 +57,7 @@ import {
   type CallCenterWorkshopOwner,
   type Conversation,
   type ChatMessage,
+  type SupportChatProduct,
 } from '@/services/chatApi';
 import {
   isChatSoundMuted,
@@ -75,9 +81,12 @@ interface ChatTabProps {
   workshopOwnerUid?: string | null;
   onInboxStatsChange?: (stats: { unreadCount: number }) => void;
   internalUnreadCount?: number;
+  /** When omitted, both products are allowed (legacy / privileged). */
+  canViewBlackChat?: boolean;
+  canViewBlueChat?: boolean;
 }
 
-type ChatMode = 'support' | 'internal';
+type ChatView = SupportChatProduct | 'internal';
 
 /** Sent automatically when opening a workshop thread from the picker (POST start-with-owner `text`). */
 const WORKSHOP_AUTO_OPEN_MESSAGE =
@@ -152,8 +161,43 @@ export function ChatTab({
   workshopOwnerUid = null,
   onInboxStatsChange,
   internalUnreadCount = 0,
+  canViewBlackChat = true,
+  canViewBlueChat = true,
 }: ChatTabProps) {
   const { pendingInternalChatAgentId } = useDashboard();
+
+  const chatAccess = useMemo<SupportChatAccess>(
+    () => ({
+      canViewBlack: canViewBlackChat,
+      canViewBlue: canViewBlueChat,
+    }),
+    [canViewBlackChat, canViewBlueChat],
+  );
+
+  const [chatView, setChatView] = useState<ChatView>(() => {
+    return (
+      defaultSupportChatProduct({
+        canViewBlack: canViewBlackChat,
+        canViewBlue: canViewBlueChat,
+      }) ?? 'black'
+    );
+  });
+
+  const supportProduct: SupportChatProduct =
+    chatView === 'blue' ? 'blue' : 'black';
+  const isInternalChat = chatView === 'internal';
+
+  useEffect(() => {
+    if (isInternalChat) return;
+    const next = defaultSupportChatProduct(chatAccess);
+    if (!next) return;
+    setChatView((prev) => {
+      if (prev === 'black' && chatAccess.canViewBlack) return prev;
+      if (prev === 'blue' && chatAccess.canViewBlue && BLUE_SUPPORT_CHAT_ENABLED) return prev;
+      if (prev === 'internal') return prev;
+      return next;
+    });
+  }, [chatAccess, isInternalChat]);
 
   const [queue, setQueue] = useState<Conversation[]>([]);
   const [mine, setMine] = useState<Conversation[]>([]);
@@ -195,7 +239,6 @@ export function ChatTab({
   const callCenterThreadIdsRef = useRef<Set<string>>(new Set());
 
   const [soundsMuted, setSoundsMuted] = useState(() => isChatSoundMuted());
-  const [chatMode, setChatMode] = useState<ChatMode>('support');
   const skipInboxChimesRef = useRef(true);
   const prevInboxSnapshotRef = useRef<Map<string, string>>(new Map());
   const threadMessageSigRef = useRef<string>('');
@@ -203,7 +246,7 @@ export function ChatTab({
 
   useEffect(() => {
     if (pendingInternalChatAgentId) {
-      setChatMode('internal');
+      setChatView('internal');
     }
   }, [pendingInternalChatAgentId]);
 
@@ -252,15 +295,26 @@ export function ChatTab({
   useEffect(() => {
     skipInboxChimesRef.current = true;
     prevInboxSnapshotRef.current = new Map();
-  }, [chatListScope.tenantId, chatListScope.ownerUid]);
+  }, [chatListScope.tenantId, chatListScope.ownerUid, supportProduct]);
 
   const loadConversations = useCallback(async () => {
+    if (
+      (supportProduct === 'black' && !chatAccess.canViewBlack) ||
+      (supportProduct === 'blue' &&
+        (!chatAccess.canViewBlue || !BLUE_SUPPORT_CHAT_ENABLED))
+    ) {
+      setQueue([]);
+      setMine([]);
+      return;
+    }
+
     const [data, ccChats] = await Promise.all([
       fetchConversations({
         tenantId: chatListScope.tenantId,
         ownerUid: chatListScope.ownerUid,
+        product: supportProduct,
       }),
-      fetchCallCenterChats(50).catch((err) => {
+      fetchCallCenterChats(50, supportProduct).catch((err) => {
         console.warn('[ChatTab] fetchCallCenterChats failed', err);
         return [] as Conversation[];
       }),
@@ -288,20 +342,57 @@ export function ChatTab({
       .map((c) => c.ownerUid)
       .filter((uid): uid is string => !!uid);
     void fetchWorkshopNames(ownerUids).then(setWorkshopNameMap);
-  }, [chatListScope]);
+  }, [chatListScope, supportProduct, chatAccess.canViewBlack, chatAccess.canViewBlue]);
 
-  const refreshThreadMessages = useCallback(async (conversationId: string) => {
-    try {
-      const rows = callCenterThreadIdsRef.current.has(conversationId)
-        ? await fetchCallCenterChatMessages(conversationId)
-        : await fetchConversationMessages(conversationId);
-      setMessages(rows);
-    } catch {
-      /* keep existing */
-    }
-  }, []);
+  const refreshThreadMessages = useCallback(
+    async (conversationId: string) => {
+      try {
+        const rows = callCenterThreadIdsRef.current.has(conversationId)
+          ? await fetchCallCenterChatMessages(conversationId, supportProduct)
+          : await fetchConversationMessages(conversationId, supportProduct);
+        setMessages(rows);
+      } catch {
+        /* keep existing */
+      }
+    },
+    [supportProduct],
+  );
+
+  const switchQueueChat = useCallback(
+    (next: SupportChatProduct) => {
+      if (next === 'black' && !chatAccess.canViewBlack) return;
+      if (next === 'blue' && (!chatAccess.canViewBlue || !BLUE_SUPPORT_CHAT_ENABLED)) return;
+      setChatView((prev) => {
+        if (prev === next) return prev;
+        return next;
+      });
+    },
+    [chatAccess.canViewBlack, chatAccess.canViewBlue],
+  );
 
   useEffect(() => {
+    if (isInternalChat) return;
+
+    setSelectedId(null);
+    setMessages([]);
+    setQueue([]);
+    setMine([]);
+    setLoading(true);
+    setError(null);
+    setThreadError(null);
+    setStartChatOpen(false);
+    setOwners([]);
+    setOwnersError(null);
+    setSelectedOwnerUid('');
+    setOwnerFilter('');
+    callCenterThreadIdsRef.current = new Set();
+    skipInboxChimesRef.current = true;
+    prevInboxSnapshotRef.current = new Map();
+  }, [supportProduct, isInternalChat]);
+
+  useEffect(() => {
+    if (isInternalChat) return;
+
     let cancelled = false;
 
     const run = async () => {
@@ -325,7 +416,7 @@ export function ChatTab({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [loadConversations]);
+  }, [loadConversations, isInternalChat]);
 
   useEffect(() => {
     if (loading) return;
@@ -377,7 +468,7 @@ export function ChatTab({
       setThreadError(null);
       try {
         if (callCenterThreadIdsRef.current.has(selectedId)) {
-          const rows = await fetchCallCenterChatMessages(selectedId);
+          const rows = await fetchCallCenterChatMessages(selectedId, supportProduct);
           if (cancelled) return;
           setMessages(rows);
 
@@ -399,6 +490,7 @@ export function ChatTab({
                 tenantName: meta?.userName ?? null,
                 workshopDisplayName: null,
                 readReceiptPosted: false,
+                product: supportProduct,
               },
             ).catch(() => {});
           }
@@ -407,13 +499,13 @@ export function ChatTab({
           return;
         }
 
-        const rows = await fetchConversationMessages(selectedId);
+        const rows = await fetchConversationMessages(selectedId, supportProduct);
         if (cancelled) return;
         setMessages(rows);
 
         let readReceiptPosted = false;
         try {
-          await postConversationRead(selectedId);
+          await postConversationRead(selectedId, supportProduct);
           readReceiptPosted = true;
         } catch {
           /* best-effort */
@@ -437,6 +529,7 @@ export function ChatTab({
               tenantName: meta?.userName ?? null,
               workshopDisplayName: null,
               readReceiptPosted,
+              product: supportProduct,
             },
           ).catch(() => {});
         }
@@ -456,7 +549,7 @@ export function ChatTab({
     return () => {
       cancelled = true;
     };
-  }, [selectedId, loadConversations, session]);
+  }, [selectedId, loadConversations, session, supportProduct]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -622,7 +715,7 @@ export function ChatTab({
       if (isInQueue) {
         setClaiming(true);
         try {
-          await postConversationClaim(conversationId);
+          await postConversationClaim(conversationId, supportProduct);
           await loadConversations();
         } catch {
           // console.warn('[ChatTab] claim failed', e);
@@ -631,24 +724,25 @@ export function ChatTab({
         }
       }
     },
-    [queue, loadConversations],
+    [queue, loadConversations, supportProduct],
   );
 
   const openStartChat = useCallback(async () => {
     setStartChatOpen(true);
     setOwnersError(null);
-    if (ownersLoading || owners.length > 0) return;
+    if (ownersLoading) return;
 
     setOwnersLoading(true);
     try {
-      const rows = await fetchCallCenterWorkshopOwners();
+      const rows = await fetchCallCenterWorkshopOwners(supportProduct);
       setOwners(rows);
     } catch (e) {
+      setOwners([]);
       setOwnersError(e instanceof Error ? e.message : 'Failed to load workshop owners.');
     } finally {
       setOwnersLoading(false);
     }
-  }, [ownersLoading, owners.length]);
+  }, [ownersLoading, supportProduct]);
 
   const closeStartChat = useCallback(() => {
     setStartChatOpen(false);
@@ -677,7 +771,9 @@ export function ChatTab({
       pendingWorkshopOwnerUidRef.current = ownerUid;
       try {
         const owner = owners.find((o) => o.ownerUid === ownerUid) ?? null;
-        const started = await startCallCenterChatWithOwner(ownerUid);
+        const started = await startCallCenterChatWithOwner(ownerUid, undefined, {
+          product: supportProduct,
+        });
         setActiveWorkshopOwner(owner);
         closeStartChat();
 
@@ -688,7 +784,7 @@ export function ChatTab({
           let sendWelcome = started.created;
           if (!sendWelcome) {
             try {
-              const existing = await fetchCallCenterChatMessages(started.chatId);
+              const existing = await fetchCallCenterChatMessages(started.chatId, supportProduct);
               sendWelcome = existing.length === 0;
             } catch {
               /* If we can't read messages, be safe and skip the welcome. */
@@ -698,7 +794,11 @@ export function ChatTab({
 
           if (sendWelcome) {
             try {
-              await postCallCenterChatMessage(started.chatId, WORKSHOP_AUTO_OPEN_MESSAGE);
+              await postCallCenterChatMessage(
+                started.chatId,
+                WORKSHOP_AUTO_OPEN_MESSAGE,
+                supportProduct,
+              );
             } catch (sendErr) {
               console.warn('[ChatTab] welcome message failed', sendErr);
             }
@@ -724,6 +824,7 @@ export function ChatTab({
       loadConversations,
       handleSelectConversation,
       owners,
+      supportProduct,
     ],
   );
 
@@ -733,10 +834,10 @@ export function ChatTab({
     setClosing(true);
     try {
       if (isCallCenterThread) {
-        await postCallCenterChatClose(selectedId);
+        await postCallCenterChatClose(selectedId, supportProduct);
         callCenterThreadIdsRef.current.delete(selectedId);
       } else {
-        await postChatClose(selectedId);
+        await postChatClose(selectedId, { product: supportProduct });
       }
       setSelectedId(null);
       await loadConversations();
@@ -757,8 +858,8 @@ export function ChatTab({
     try {
       const isCallCenterThread = callCenterThreadIdsRef.current.has(selectedId);
       const created = isCallCenterThread
-        ? await postCallCenterChatMessage(selectedId, text)
-        : await postConversationMessage(selectedId, text);
+        ? await postCallCenterChatMessage(selectedId, text, supportProduct)
+        : await postConversationMessage(selectedId, text, supportProduct);
       shouldAutoScrollThreadRef.current = true;
       setDraft('');
 
@@ -776,8 +877,8 @@ export function ChatTab({
         });
       } else {
         const rows = isCallCenterThread
-          ? await fetchCallCenterChatMessages(selectedId)
-          : await fetchConversationMessages(selectedId);
+          ? await fetchCallCenterChatMessages(selectedId, supportProduct)
+          : await fetchConversationMessages(selectedId, supportProduct);
         setMessages(rows);
       }
 
@@ -789,6 +890,7 @@ export function ChatTab({
         messageId: replyId,
         textPreview: text.slice(0, 400),
         tenantName: selectedConversation?.userName ?? null,
+        product: supportProduct,
       }).catch(() => {});
     } catch (err) {
       setThreadError(err instanceof Error ? err.message : 'Failed to send message.');
@@ -807,45 +909,89 @@ export function ChatTab({
     );
   }
 
+  const hasAnyQueueChat =
+    chatAccess.canViewBlack || (chatAccess.canViewBlue && BLUE_SUPPORT_CHAT_ENABLED);
+  const productLabel = supportProduct === 'blue' ? 'Blue' : 'Black';
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
-      {/* Sub-tab Navigation */}
       <div className="flex items-center gap-1 self-start rounded-2xl bg-slate-100 p-1">
+        {chatAccess.canViewBlack && (
+          <Button
+            type="button"
+            variant={chatView === 'black' ? 'secondary' : 'ghost'}
+            size="sm"
+            onClick={() => switchQueueChat('black')}
+            className={cn(
+              'h-9 px-4 rounded-xl font-bold transition-all',
+              chatView === 'black'
+                ? 'bg-white text-slate-900 shadow-sm'
+                : 'text-slate-500 hover:text-slate-900',
+            )}
+          >
+            <MessageSquare className="mr-2 h-4 w-4" />
+            Black Chat
+          </Button>
+        )}
+        {chatAccess.canViewBlue && (
+          <span
+            title={
+              BLUE_SUPPORT_CHAT_ENABLED
+                ? undefined
+                : 'Blue Chat is disabled until the API is ready.'
+            }
+          >
+            <Button
+              type="button"
+              variant={chatView === 'blue' ? 'secondary' : 'ghost'}
+              size="sm"
+              disabled={!BLUE_SUPPORT_CHAT_ENABLED}
+              onClick={() => switchQueueChat('blue')}
+              className={cn(
+                'h-9 px-4 rounded-xl font-bold transition-all',
+                chatView === 'blue'
+                  ? 'bg-white text-blue-700 shadow-sm'
+                  : 'text-slate-500 hover:text-slate-900',
+                !BLUE_SUPPORT_CHAT_ENABLED && 'pointer-events-none opacity-50',
+              )}
+            >
+              <MessageSquare className="mr-2 h-4 w-4" />
+              Blue Chat
+            </Button>
+          </span>
+        )}
         <Button
-          variant={chatMode === 'support' ? 'secondary' : 'ghost'}
+          type="button"
+          variant={isInternalChat ? 'secondary' : 'ghost'}
           size="sm"
-          onClick={() => setChatMode('support')}
+          onClick={() => setChatView('internal')}
           className={cn(
-            "h-9 px-4 rounded-xl font-bold transition-all",
-            chatMode === 'support' ? "bg-white text-sky-600 shadow-sm" : "text-slate-500 hover:text-slate-900"
-          )}
-        >
-          <MessageSquare className="mr-2 h-4 w-4" />
-          Support Chat
-        </Button>
-        <Button
-          variant={chatMode === 'internal' ? 'secondary' : 'ghost'}
-          size="sm"
-          onClick={() => setChatMode('internal')}
-          className={cn(
-            "h-9 px-4 rounded-xl font-bold transition-all",
-            chatMode === 'internal' ? "bg-white text-emerald-600 shadow-sm" : "text-slate-500 hover:text-slate-900"
+            'h-9 px-4 rounded-xl font-bold transition-all',
+            isInternalChat
+              ? 'bg-white text-emerald-600 shadow-sm'
+              : 'text-slate-500 hover:text-slate-900',
           )}
         >
           <Users className="mr-2 h-4 w-4" />
           Internal Chat
           {internalUnreadCount > 0 && (
-            <Badge 
-              className="ml-2 bg-emerald-500 text-white border-none h-5 min-w-[20px] px-1 flex items-center justify-center text-[10px] animate-pulse shadow-[0_0_10px_rgba(16,185,129,0.4)]"
-            >
+            <Badge className="ml-2 bg-emerald-500 text-white border-none h-5 min-w-[20px] px-1 flex items-center justify-center text-[10px] animate-pulse shadow-[0_0_10px_rgba(16,185,129,0.4)]">
               {internalUnreadCount}
             </Badge>
           )}
         </Button>
       </div>
 
-      {chatMode === 'internal' ? (
+      {isInternalChat ? (
         <InternalChatTab session={session} permissions={permissions} />
+      ) : !hasAnyQueueChat ? (
+        <Card className="border-border/80 bg-white shadow-sm">
+          <CardContent className="py-10 text-center text-sm text-muted-foreground">
+            {chatAccess.canViewBlue && !BLUE_SUPPORT_CHAT_ENABLED
+              ? 'Blue Chat is disabled until the API is ready.'
+              : 'No chat queue is assigned to your agent profile. Ask a super admin to assign a Black or Blue queue in the Agents tab.'}
+          </CardContent>
+        </Card>
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(280px,360px)_1fr] lg:items-stretch">
           <Card
@@ -857,8 +1003,13 @@ export function ChatTab({
             <CardHeader className="shrink-0 pb-3">
               <CardTitle className="flex items-center justify-between gap-2 text-base">
                 <span className="flex items-center gap-2">
-                  <MessageSquare className="h-4 w-4 text-sky-600" />
-                  Chat Inbox
+                  <MessageSquare
+                    className={cn(
+                      'h-4 w-4',
+                      supportProduct === 'blue' ? 'text-blue-700' : 'text-sky-600',
+                    )}
+                  />
+                  {productLabel} Chat Inbox
                 </span>
                 <div className="flex shrink-0 items-center gap-1.5">
                   <Button

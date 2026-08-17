@@ -26,9 +26,28 @@ export interface MeResponse {
 
 export const DEFAULT_API_BASE = '/api';
 
-export const API_BASE =
-  (import.meta.env.VITE_API_BASE as string | undefined)?.trim().replace(/\/+$/, '') ||
-  DEFAULT_API_BASE;
+function envApiBase(): string | undefined {
+  const raw = (import.meta.env.VITE_API_BASE as string | undefined)?.trim().replace(/\/+$/, '');
+  return raw || undefined;
+}
+
+/**
+ * Browser API root. In Vite dev, always same-origin `/api` so requests go
+ * through the proxy in vite.config.ts. Calling the :5050 host from
+ * localhost:8080 is a cross-origin request, and that API does not send
+ * Access-Control-Allow-Origin for the dashboard origin.
+ */
+export const API_BASE = (() => {
+  const fromEnv = envApiBase();
+  if (
+    import.meta.env.DEV &&
+    fromEnv &&
+    (fromEnv.startsWith('http://') || fromEnv.startsWith('https://'))
+  ) {
+    return DEFAULT_API_BASE;
+  }
+  return fromEnv || DEFAULT_API_BASE;
+})();
 
 /** Dev-only: `/api/...` prefixes served from localhost:5050 (see VITE_LOCAL_API_PATHS). */
 function parseLocalApiPathPrefixes(): string[] {
@@ -271,7 +290,7 @@ export function authHeaders(): HeadersInit {
 }
 
 export async function login(email: string, password: string): Promise<LoginResponse> {
-  const res = await fetch(authUrl('/auth/login'), {
+  const res = await fetch(resolveRequestUrl('/auth/login'), {
     method: 'POST',
     headers: {
       Accept: 'application/json',

@@ -14,11 +14,11 @@ const supabase = createClient(
 const RECORDING_BASE_URL = Deno.env.get('YEASTAR_RECORDING_BASE_URL') ?? '';
 
 Deno.serve(async (req) => {
-  // CORS preflight
+  // PBX-to-server webhook: no browser calls it, so no origin is allowed.
   if (req.method === 'OPTIONS') {
     return new Response(null, {
+      status: 204,
       headers: {
-        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       },

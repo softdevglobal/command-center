@@ -11,7 +11,7 @@ import {
   BMS_BLACK_API_URL,
   bmsBlackFetch,
   bmsBlackHeaders,
-} from '@/services/bmsBlackApi';
+} from '@/lib/bms-black-api';
 
 const BASE_URL = BMS_BLACK_API_URL;
 

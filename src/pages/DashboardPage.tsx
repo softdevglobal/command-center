@@ -90,6 +90,15 @@ const AgentCompletedTab = lazy(() =>
 
 import { fetchClients, createClient, advanceClientStage } from '@/services/dashboardApi';
 import { fetchCallCenterChats, fetchConversations } from '@/services/chatApi';
+import {
+  BLUE_SUPPORT_CHAT_ENABLED,
+  resolveSupportChatAccess,
+  type QueueKind,
+} from '@/lib/queueKind';
+import {
+  fetchMyShiftSchedule,
+  getTodayShiftQueueId,
+} from '@/services/attendanceApi';
 import { fetchSmsUnreadCount, subscribeToSmsUpdates } from '@/services/smsApi';
 import {
   fetchAllLeaveRequests,
@@ -273,6 +282,76 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
     [d.agents, session.userId, session.authEmail, session.displayName],
   );
 
+  const currentAgent = useMemo(
+    () => (currentAgentDbId ? d.agents.find((a) => a.id === currentAgentDbId) ?? null : null),
+    [currentAgentDbId, d.agents],
+  );
+
+  /** Today's shift-board queue for agents (same source as Overview). */
+  const [todayShiftQueueId, setTodayShiftQueueId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (session.role !== 'agent') {
+      setTodayShiftQueueId(null);
+      return;
+    }
+
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const matchingAgentIds = d.agents
+          .filter((agent) => agent.userId === session.userId)
+          .map((agent) => agent.id);
+        if (currentAgentDbId && !matchingAgentIds.includes(currentAgentDbId)) {
+          matchingAgentIds.push(currentAgentDbId);
+        }
+
+        const schedule = await fetchMyShiftSchedule({
+          userId: session.userId,
+          candidateIds: matchingAgentIds,
+        });
+        if (cancelled) return;
+        setTodayShiftQueueId(getTodayShiftQueueId(schedule));
+      } catch (err) {
+        console.warn('[DashboardPage] failed to load today shift queue for chat', err);
+        if (!cancelled) setTodayShiftQueueId(null);
+      }
+    };
+
+    void load();
+    const id = setInterval(load, 5 * 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [session.role, session.userId, currentAgentDbId, d.agents]);
+
+  const agentChatQueueIds = useMemo(() => {
+    if (session.role !== 'agent') {
+      return currentAgent?.queueIds?.length
+        ? currentAgent.queueIds
+        : session.allowedQueueIds;
+    }
+    // Match Overview / shift board: today's assigned queue drives access.
+    if (todayShiftQueueId) return [todayShiftQueueId];
+    return [];
+  }, [
+    session.role,
+    session.allowedQueueIds,
+    currentAgent?.queueIds,
+    todayShiftQueueId,
+  ]);
+
+  const supportChatAccess = useMemo(
+    () =>
+      resolveSupportChatAccess({
+        role: session.role,
+        queues: d.queues,
+        assignedQueueIds: agentChatQueueIds,
+      }),
+    [session.role, d.queues, agentChatQueueIds],
+  );
+
   const [chatNavUnreadCount, setChatNavUnreadCount] = useState(0);
   const [smsNavUnreadCount, setSmsNavUnreadCount] = useState(0);
   const [internalChatUnreadCount, setInternalChatUnreadCount] = useState(0);
@@ -282,29 +361,41 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
     if (!permissions.canViewChatTab) return;
     if (d.selectedTab === 'chat') return;
 
+    const products: QueueKind[] = [];
+    if (supportChatAccess.canViewBlack) products.push('black');
+    if (supportChatAccess.canViewBlue && BLUE_SUPPORT_CHAT_ENABLED) products.push('blue');
+    if (products.length === 0) {
+      setChatNavUnreadCount(0);
+      return;
+    }
+
     let cancelled = false;
     const run = async () => {
       try {
-        const [supportChats, callCenterChats] = await Promise.all([
-          effectiveChatTenantId
-            ? fetchConversations({
-                tenantId: effectiveChatTenantId,
-                ownerUid: chatWorkshopOwnerUid,
-              }).catch(() => ({ queue: [], mine: [] }))
-            : Promise.resolve({ queue: [], mine: [] }),
-          fetchCallCenterChats(50).catch(() => []),
-        ]);
+        const results = await Promise.all(
+          products.map(async (product) => {
+            const [supportChats, callCenterChats] = await Promise.all([
+              effectiveChatTenantId
+                ? fetchConversations({
+                    tenantId: effectiveChatTenantId,
+                    ownerUid: chatWorkshopOwnerUid,
+                    product,
+                  }).catch(() => ({ queue: [], mine: [] }))
+                : Promise.resolve({ queue: [], mine: [] }),
+              fetchCallCenterChats(50, product).catch(() => []),
+            ]);
+            const supportRows = [...supportChats.queue, ...supportChats.mine];
+            const supportIds = new Set(supportRows.map((c) => c.conversationId));
+            return [
+              ...supportRows,
+              ...callCenterChats.filter((c) => !supportIds.has(c.conversationId)),
+            ];
+          }),
+        );
         if (!cancelled) {
-          const supportRows = [...supportChats.queue, ...supportChats.mine];
-          const supportIds = new Set(supportRows.map((c) => c.conversationId));
-          const mergedRows = [
-            ...supportRows,
-            ...callCenterChats.filter((c) => !supportIds.has(c.conversationId)),
-          ];
-          const unreadCount = mergedRows.reduce(
-            (sum, c) => sum + (Number(c.unreadForAgent) || 0),
-            0,
-          );
+          const unreadCount = results
+            .flat()
+            .reduce((sum, c) => sum + (Number(c.unreadForAgent) || 0), 0);
           setChatNavUnreadCount(unreadCount);
         }
       } catch {
@@ -323,6 +414,8 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
     d.selectedTab,
     effectiveChatTenantId,
     chatWorkshopOwnerUid,
+    supportChatAccess.canViewBlack,
+    supportChatAccess.canViewBlue,
   ]);
 
   useEffect(() => {
@@ -607,6 +700,8 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
                       setChatNavUnreadCount(unreadCount)
                     }
                     internalUnreadCount={internalChatUnreadCount}
+                    canViewBlackChat={supportChatAccess.canViewBlack}
+                    canViewBlueChat={supportChatAccess.canViewBlue}
                   />
                 </div>
               )}

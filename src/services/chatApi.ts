@@ -1,21 +1,51 @@
 import { supabase } from '@/integrations/supabase/client';
 import { API_BASE, apiFetch, getAccessToken } from '@/lib/api';
+import { BLUE_SUPPORT_CHAT_ENABLED, type QueueKind } from '@/lib/queueKind';
 import { fetchAgentsList } from '@/services/agentApis';
 import type { Agent } from '@/services/types';
 
-const BASE_URL =
-  (import.meta.env.VITE_BMS_SUPPORT_CHAT_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
-  `${API_BASE}/bms-black`;
+/** Black (BMS Pro) vs Blue (Trade) support / call-center chat backends. */
+export type SupportChatProduct = QueueKind;
 
 const AGENT_PREFIX = '/agent/conversations';
-
-const CALL_CENTER_BASE_URL =
-  (import.meta.env.VITE_CALL_CENTER_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
-  `${API_BASE}/bms-black`;
 
 const AGENT_CHAT_API_URL =
   (import.meta.env.VITE_AGENT_CHAT_API_URL as string | undefined)?.trim().replace(/\/+$/, '') ||
   `${API_BASE}/agent-chat`;
+
+function supportChatBaseUrl(product: SupportChatProduct = 'black'): string {
+  if (product === 'blue') {
+    return (
+      (import.meta.env.VITE_BMS_BLUE_SUPPORT_CHAT_API_URL as string | undefined)
+        ?.trim()
+        .replace(/\/+$/, '') || `${API_BASE}/bms-blue`
+    );
+  }
+  return (
+    (import.meta.env.VITE_BMS_SUPPORT_CHAT_API_URL as string | undefined)
+      ?.trim()
+      .replace(/\/+$/, '') || `${API_BASE}/bms-black`
+  );
+}
+
+function callCenterBaseUrl(product: SupportChatProduct = 'black'): string {
+  if (product === 'blue') {
+    return (
+      (import.meta.env.VITE_BLUE_CALL_CENTER_API_URL as string | undefined)
+        ?.trim()
+        .replace(/\/+$/, '') ||
+      (import.meta.env.VITE_BMS_BLUE_SUPPORT_CHAT_API_URL as string | undefined)
+        ?.trim()
+        .replace(/\/+$/, '') ||
+      `${API_BASE}/bms-blue`
+    );
+  }
+  return (
+    (import.meta.env.VITE_CALL_CENTER_API_URL as string | undefined)
+      ?.trim()
+      .replace(/\/+$/, '') || `${API_BASE}/bms-black`
+  );
+}
 
 // ── Row from GET /agent/conversations (queue | mine) ──────────────────────
 
@@ -123,6 +153,8 @@ export type FetchChatsOptions = {
   ownerUid?: string | null;
   queueLimit?: number;
   mineLimit?: number;
+  /** Defaults to Black (`/api/bms-black`). */
+  product?: SupportChatProduct;
 };
 
 export type FetchChatMessagesOptions = {
@@ -135,12 +167,24 @@ export type FetchChatMessagesPage = {
   nextBefore: string | null;
 };
 
-async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+function assertBlueChatReady(product: SupportChatProduct): void {
+  if (product === 'blue' && !BLUE_SUPPORT_CHAT_ENABLED) {
+    throw new Error('Blue Chat API is disabled until the backend is ready.');
+  }
+}
+
+async function authorizedFetch(
+  path: string,
+  init: RequestInit = {},
+  product: SupportChatProduct = 'black',
+): Promise<Response> {
+  assertBlueChatReady(product);
   const headers = new Headers(init.headers);
   if (!headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  const url = `${BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
+  const base = supportChatBaseUrl(product);
+  const url = `${base}${path.startsWith('/') ? path : `/${path}`}`;
 
   // BMS chat errors (401/403/404) must not invalidate the dashboard session.
   return apiFetch(url, { ...init, headers, logoutOnSessionExpired: false });
@@ -149,12 +193,15 @@ async function authorizedFetch(path: string, init: RequestInit = {}): Promise<Re
 async function authorizedFetchCallCenter(
   path: string,
   init: RequestInit = {},
+  product: SupportChatProduct = 'black',
 ): Promise<Response> {
+  assertBlueChatReady(product);
   const headers = new Headers(init.headers);
   if (!headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
-  const url = `${CALL_CENTER_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
+  const base = callCenterBaseUrl(product);
+  const url = `${base}${path.startsWith('/') ? path : `/${path}`}`;
   return apiFetch(url, { ...init, headers, logoutOnSessionExpired: false });
 }
 
@@ -377,6 +424,10 @@ function readNextBefore(json: unknown): string | null {
 export async function fetchConversations(
   options?: FetchChatsOptions,
 ): Promise<ConversationsResponse> {
+  const product = options?.product ?? 'black';
+  if (product === 'blue' && !BLUE_SUPPORT_CHAT_ENABLED) {
+    return { queue: [], mine: [] };
+  }
   const ou = options?.ownerUid?.trim() || '';
   const params = new URLSearchParams();
   appendScopeQuery(params, options);
@@ -385,7 +436,7 @@ export async function fetchConversations(
   const qs = params.toString();
   const path = `${AGENT_PREFIX}${qs ? `?${qs}` : ''}`;
 
-  const res = await authorizedFetch(path, { headers: tenantScopedHeaders(ou) });
+  const res = await authorizedFetch(path, { headers: tenantScopedHeaders(ou) }, product);
 
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
@@ -402,20 +453,24 @@ export async function fetchConversations(
 /** @deprecated Use {@link fetchConversations} */
 export const fetchAgentConversations = fetchConversations;
 
-export async function fetchConversationMessages(conversationId: string): Promise<ChatMessage[]> {
-  const page = await fetchChatMessagesPage(conversationId);
+export async function fetchConversationMessages(
+  conversationId: string,
+  product: SupportChatProduct = 'black',
+): Promise<ChatMessage[]> {
+  const page = await fetchChatMessagesPage(conversationId, undefined, product);
   return page.messages;
 }
 
 export async function postConversationMessage(
   conversationId: string,
   text: string,
+  product: SupportChatProduct = 'black',
 ): Promise<ChatMessage | null> {
   const path = `${AGENT_PREFIX}/${encodeURIComponent(conversationId)}/messages`;
   const res = await authorizedFetch(path, {
     method: 'POST',
     body: JSON.stringify({ message: text }),
-  });
+  }, product);
 
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
@@ -447,10 +502,14 @@ export async function postConversationMessage(
   }
 }
 
-export async function postConversationClaim(conversationId: string): Promise<void> {
+export async function postConversationClaim(
+  conversationId: string,
+  product: SupportChatProduct = 'black',
+): Promise<void> {
   const res = await authorizedFetch(
     `${AGENT_PREFIX}/${encodeURIComponent(conversationId)}/claim`,
     { method: 'POST', body: '{}' },
+    product,
   );
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
@@ -458,10 +517,14 @@ export async function postConversationClaim(conversationId: string): Promise<voi
   }
 }
 
-export async function postConversationRead(conversationId: string): Promise<void> {
+export async function postConversationRead(
+  conversationId: string,
+  product: SupportChatProduct = 'black',
+): Promise<void> {
   const res = await authorizedFetch(
     `${AGENT_PREFIX}/${encodeURIComponent(conversationId)}/read`,
     { method: 'POST', body: '{}' },
+    product,
   );
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
@@ -469,10 +532,14 @@ export async function postConversationRead(conversationId: string): Promise<void
   }
 }
 
-export async function postConversationClose(conversationId: string): Promise<void> {
+export async function postConversationClose(
+  conversationId: string,
+  product: SupportChatProduct = 'black',
+): Promise<void> {
   const res = await authorizedFetch(
     `${AGENT_PREFIX}/${encodeURIComponent(conversationId)}/close`,
     { method: 'POST', body: '{}' },
+    product,
   );
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
@@ -553,8 +620,10 @@ function toCallCenterWorkshopOwner(raw: unknown): CallCenterWorkshopOwner {
   };
 }
 
-export async function fetchCallCenterWorkshopOwners(): Promise<CallCenterWorkshopOwner[]> {
-  const res = await authorizedFetchCallCenter('/chats/workshop-owners');
+export async function fetchCallCenterWorkshopOwners(
+  product: SupportChatProduct = 'black',
+): Promise<CallCenterWorkshopOwner[]> {
+  const res = await authorizedFetchCallCenter('/chats/workshop-owners', {}, product);
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
     throw new Error(
@@ -620,8 +689,9 @@ function extractChatId(json: unknown): string {
 export async function startCallCenterChatWithOwner(
   workshopOwnerUid: string,
   text?: string,
-  options?: { branchId?: string | null; branchName?: string | null },
+  options?: { branchId?: string | null; branchName?: string | null; product?: SupportChatProduct },
 ): Promise<StartCallCenterChatResponse> {
+  const product = options?.product ?? 'black';
   const body: Record<string, unknown> = { workshopOwnerUid };
   if (text != null && text.trim()) body.text = text.trim();
   const branchId = options?.branchId?.trim();
@@ -632,7 +702,7 @@ export async function startCallCenterChatWithOwner(
   const res = await authorizedFetchCallCenter('/chats/start-with-owner', {
     method: 'POST',
     body: JSON.stringify(body),
-  });
+  }, product);
 
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
@@ -651,10 +721,12 @@ export async function startCallCenterChatWithOwner(
 export async function postCallCenterChatMessage(
   chatId: string,
   text: string,
+  product: SupportChatProduct = 'black',
 ): Promise<ChatMessage | null> {
   const res = await authorizedFetchCallCenter(
     `/chats/${encodeURIComponent(chatId)}/messages`,
     { method: 'POST', body: JSON.stringify({ text }) },
+    product,
   );
 
   if (!res.ok) {
@@ -687,9 +759,14 @@ export async function postCallCenterChatMessage(
   }
 }
 
-export async function fetchCallCenterChatMessages(chatId: string): Promise<ChatMessage[]> {
+export async function fetchCallCenterChatMessages(
+  chatId: string,
+  product: SupportChatProduct = 'black',
+): Promise<ChatMessage[]> {
   const res = await authorizedFetchCallCenter(
     `/chats/${encodeURIComponent(chatId)}/messages`,
+    {},
+    product,
   );
   if (res.status === 404) return [];
   if (!res.ok) {
@@ -703,10 +780,14 @@ export async function fetchCallCenterChatMessages(chatId: string): Promise<ChatM
   return rows.map((row) => toMessage(row, chatId));
 }
 
-export async function postCallCenterChatClose(chatId: string): Promise<void> {
+export async function postCallCenterChatClose(
+  chatId: string,
+  product: SupportChatProduct = 'black',
+): Promise<void> {
   const res = await authorizedFetchCallCenter(
     `/chats/${encodeURIComponent(chatId)}/close`,
     { method: 'POST', body: '{}' },
+    product,
   );
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
@@ -786,10 +867,16 @@ function ccChatToConversation(raw: unknown): Conversation {
 }
 
 /** Returns the call-center direct chats visible to the current agent (assigned + reachable workshops). */
-export async function fetchCallCenterChats(limit = 50): Promise<Conversation[]> {
+export async function fetchCallCenterChats(
+  limit = 50,
+  product: SupportChatProduct = 'black',
+): Promise<Conversation[]> {
+  if (product === 'blue' && !BLUE_SUPPORT_CHAT_ENABLED) {
+    return [];
+  }
   const params = new URLSearchParams();
   params.set('limit', String(limit));
-  const res = await authorizedFetchCallCenter(`/chats?${params.toString()}`);
+  const res = await authorizedFetchCallCenter(`/chats?${params.toString()}`, {}, product);
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
     throw new Error(
@@ -812,6 +899,7 @@ export async function fetchChats(options?: FetchChatsOptions): Promise<ChatItem[
 export async function fetchChatMessagesPage(
   conversationId: string,
   options?: FetchChatMessagesOptions,
+  product: SupportChatProduct = 'black',
 ): Promise<FetchChatMessagesPage> {
   const params = new URLSearchParams();
   if (options?.limit != null) params.set('limit', String(options.limit));
@@ -820,7 +908,7 @@ export async function fetchChatMessagesPage(
   const qs = params.toString();
   const path = `${AGENT_PREFIX}/${encodeURIComponent(conversationId)}/messages${qs ? `?${qs}` : ''}`;
 
-  const res = await authorizedFetch(path);
+  const res = await authorizedFetch(path, {}, product);
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);
     throw new Error(
@@ -839,39 +927,48 @@ export async function fetchChatMessagesPage(
 export async function fetchChatMessages(
   conversationId: string,
   options?: FetchChatMessagesOptions,
+  product: SupportChatProduct = 'black',
 ): Promise<ChatMessage[]> {
-  const page = await fetchChatMessagesPage(conversationId, options);
+  const page = await fetchChatMessagesPage(conversationId, options, product);
   return page.messages;
 }
 
 export async function postChatMessage(
   conversationId: string,
   text: string,
-  options?: { claimOn403?: boolean },
+  options?: { claimOn403?: boolean; product?: SupportChatProduct },
 ): Promise<ChatMessage | null> {
-  void options;
-  return postConversationMessage(conversationId, text);
+  void options?.claimOn403;
+  return postConversationMessage(conversationId, text, options?.product ?? 'black');
 }
 
-export async function postChatRead(conversationId: string): Promise<void> {
-  return postConversationRead(conversationId);
+export async function postChatRead(
+  conversationId: string,
+  product: SupportChatProduct = 'black',
+): Promise<void> {
+  return postConversationRead(conversationId, product);
 }
 
-export async function postChatClaim(conversationId: string): Promise<void> {
-  return postConversationClaim(conversationId);
+export async function postChatClaim(
+  conversationId: string,
+  product: SupportChatProduct = 'black',
+): Promise<void> {
+  return postConversationClaim(conversationId, product);
 }
 
 export async function postChatClose(
   conversationId: string,
-  opts?: { farewellMessage?: string },
+  opts?: { farewellMessage?: string; product?: SupportChatProduct },
 ): Promise<void> {
   const farewell = opts?.farewellMessage?.trim();
+  const product = opts?.product ?? 'black';
   const res = await authorizedFetch(
     `${AGENT_PREFIX}/${encodeURIComponent(conversationId)}/close`,
     {
       method: 'POST',
       body: JSON.stringify(farewell ? { farewellMessage: farewell } : {}),
     },
+    product,
   );
   if (!res.ok) {
     const detail = await readHttpErrorDetail(res);

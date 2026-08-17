@@ -1,5 +1,5 @@
 import { apiFetch } from "@/lib/api";
-import { BMS_BLACK_API_URL, bmsBlackHeaders } from "./bmsBlackApi";
+import { BMS_BLACK_API_URL, bmsBlackHeaders } from "@/lib/bms-black-api";
 import type {
   CallerContext,
   CustomerRecord,

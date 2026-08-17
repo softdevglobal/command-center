@@ -1,5 +1,6 @@
 import {
   attendanceDayRangeAustralianYmd,
+  AU_DASHBOARD_TIMEZONE,
   getAustralianDateKey,
 } from "@/utils/australianTime";
 import { supabase } from "@/integrations/supabase/client";
@@ -65,7 +66,33 @@ const SHIFT_SCHEDULE_DAYS = [
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-type ShiftScheduleDay = (typeof SHIFT_SCHEDULE_DAYS)[number];
+export type ShiftScheduleDay = (typeof SHIFT_SCHEDULE_DAYS)[number];
+
+/** Melbourne weekday key used by shift schedules (`monday` … `sunday`). */
+export function getShiftScheduleWeekday(at: number = Date.now()): ShiftScheduleDay {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: AU_DASHBOARD_TIMEZONE,
+    weekday: "long",
+  })
+    .format(new Date(at))
+    .toLowerCase() as ShiftScheduleDay;
+}
+
+/**
+ * Queue assigned on the shift board for “today” (Melbourne).
+ * Returns null when the agent is OFF that day or no queue is set.
+ */
+export function getTodayShiftQueueId(
+  schedule: AgentShiftSchedule | null | undefined,
+  at: number = Date.now(),
+): string | null {
+  if (!schedule) return null;
+  const day = getShiftScheduleWeekday(at);
+  const todayShift = schedule[day] ?? null;
+  if (!todayShift) return null;
+  const queueId = schedule.dayQueueIds?.[day]?.trim() || null;
+  return queueId || null;
+}
 
 type UntypedSupabase = {
   from: (table: string) => UntypedSupabaseQuery;
