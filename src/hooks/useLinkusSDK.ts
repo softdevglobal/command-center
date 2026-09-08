@@ -97,16 +97,80 @@ const AUDIO_ELEMENT_ID = '__softphone_remote_audio__';
 const RINGTONE_ELEMENT_ID = '__softphone_ringtone__';
 const RINGTONE_SRC = `${import.meta.env.BASE_URL}ringtone.mp3`;
 
+const remoteAudioBlockedListeners = new Set<(blocked: boolean) => void>();
+
+function notifyRemoteAudioBlocked(blocked: boolean) {
+  remoteAudioBlockedListeners.forEach((fn) => fn(blocked));
+}
+
+function extractMediaStream(stream: unknown): MediaStream | null {
+  if (stream instanceof MediaStream) return stream;
+  if (stream && typeof stream === 'object' && 'stream' in stream) {
+    const inner = (stream as { stream: unknown }).stream;
+    if (inner instanceof MediaStream) return inner;
+  }
+  return null;
+}
+
 function getOrCreateAudio(): HTMLAudioElement {
   let el = document.getElementById(AUDIO_ELEMENT_ID) as HTMLAudioElement | null;
   if (!el) {
     el = document.createElement('audio');
     el.id = AUDIO_ELEMENT_ID;
-    el.autoplay = true;
     el.style.cssText = 'position:absolute;width:0;height:0;opacity:0;pointer-events:none;';
     document.body.appendChild(el);
   }
+  el.autoplay = true;
+  el.muted = false;
+  el.volume = 1;
+  el.setAttribute('playsinline', 'true');
+  el.setAttribute('webkit-playsinline', 'true');
+  el.playsInline = true;
   return el;
+}
+
+let playRetryHandler: (() => void) | null = null;
+
+function unbindRemotePlayRetry() {
+  if (!playRetryHandler) return;
+  document.removeEventListener('click', playRetryHandler);
+  document.removeEventListener('keydown', playRetryHandler);
+  playRetryHandler = null;
+}
+
+function bindRemotePlayRetry() {
+  if (playRetryHandler) return;
+  playRetryHandler = () => {
+    void playRemoteAudio();
+  };
+  document.addEventListener('click', playRetryHandler);
+  document.addEventListener('keydown', playRetryHandler);
+}
+
+function playRemoteAudio(): Promise<boolean> {
+  const audio = getOrCreateAudio();
+  if (!audio.srcObject) return Promise.resolve(false);
+  return audio
+    .play()
+    .then(() => {
+      notifyRemoteAudioBlocked(false);
+      unbindRemotePlayRetry();
+      return true;
+    })
+    .catch(() => {
+      notifyRemoteAudioBlocked(true);
+      bindRemotePlayRetry();
+      return false;
+    });
+}
+
+let streamAddTrackHandler: ((ev: Event) => void) | null = null;
+
+function detachStreamTrackListener(stream: MediaStream | null) {
+  if (stream && streamAddTrackHandler) {
+    stream.removeEventListener('addtrack', streamAddTrackHandler);
+  }
+  streamAddTrackHandler = null;
 }
 
 function getOrCreateRingtone(): HTMLAudioElement {
@@ -123,24 +187,34 @@ function getOrCreateRingtone(): HTMLAudioElement {
 }
 
 function attachRemoteStream(stream: unknown) {
-  // The SDK occasionally emits updateRemoteStream with undefined/null
-  // during teardown. Ignore anything that isn't a real MediaStream.
-  if (!(stream instanceof MediaStream)) return;
+  // Yeastar emits streamAdded as { stream }, and also a bare MediaStream.
+  // updateRemoteStream can be undefined/null during teardown.
+  const media = extractMediaStream(stream);
+  if (!media) return;
   const audio = getOrCreateAudio();
-  if (audio.srcObject !== stream) {
-    audio.srcObject = stream;
-    audio.play().catch(() => {
-      // Autoplay blocked — will retry on next user gesture
-    });
+  const prev = audio.srcObject instanceof MediaStream ? audio.srcObject : null;
+  if (audio.srcObject !== media) {
+    detachStreamTrackListener(prev);
+    audio.srcObject = media;
+    streamAddTrackHandler = () => {
+      void playRemoteAudio();
+    };
+    media.addEventListener('addtrack', streamAddTrackHandler);
   }
+  audio.muted = false;
+  audio.volume = 1;
+  void playRemoteAudio();
 }
 
 function detachAudio() {
   const el = document.getElementById(AUDIO_ELEMENT_ID) as HTMLAudioElement | null;
   if (el) {
+    detachStreamTrackListener(el.srcObject instanceof MediaStream ? el.srcObject : null);
     el.srcObject = null;
     el.pause();
   }
+  unbindRemotePlayRetry();
+  notifyRemoteAudioBlocked(false);
 }
 
 function stopRingtone() {
@@ -175,8 +249,17 @@ export function useLinkusSDK({
   );
   const [incomingCallIds, setIncomingCallIds] = useState<string[]>([]);
   const [isRegistered, setIsRegistered] = useState(false);
+  const [remoteAudioBlocked, setRemoteAudioBlocked] = useState(false);
   const incomingCallIdsRef = useRef<string[]>([]);
   incomingCallIdsRef.current = incomingCallIds;
+
+  useEffect(() => {
+    const onBlocked = (blocked: boolean) => setRemoteAudioBlocked(blocked);
+    remoteAudioBlockedListeners.add(onBlocked);
+    return () => {
+      remoteAudioBlockedListeners.delete(onBlocked);
+    };
+  }, []);
 
   const phoneRef = useRef<PhoneOperator | null>(null);
   const pbxRef = useRef<PBXOperator | null>(null);
@@ -406,6 +489,7 @@ export function useLinkusSDK({
           // });
 
           upsertCall(session.status);
+          if (session.remoteStream) attachRemoteStream(session.remoteStream);
 
           session.on('statusChange', () => {
             if (cancelled) return;
@@ -415,6 +499,7 @@ export function useLinkusSDK({
             // didn't fire reliably for this call.
             if (session.status.callStatus === 'talking') {
               dismissIncoming(callId);
+              if (session.remoteStream) attachRemoteStream(session.remoteStream);
             }
           });
 
@@ -423,6 +508,7 @@ export function useLinkusSDK({
             console.log('[useLinkusSDK] session accepted', callId);
             dismissIncoming(callId);
             upsertCall(session.status);
+            if (session.remoteStream) attachRemoteStream(session.remoteStream);
           });
 
           session.on('confirmed', () => {
@@ -430,8 +516,12 @@ export function useLinkusSDK({
             console.log('[useLinkusSDK] session confirmed', callId);
             dismissIncoming(callId);
             upsertCall(session.status);
-            // Attach audio as soon as the call is confirmed (both sides connected)
             if (session.remoteStream) attachRemoteStream(session.remoteStream);
+          });
+
+          // Official Yeastar event — remote MediaStream is ready to play.
+          session.on('streamAdded', (payload: unknown) => {
+            if (!cancelled) attachRemoteStream(payload);
           });
 
           // updateRemoteStream fires whenever the MediaStream track changes.
@@ -486,6 +576,8 @@ export function useLinkusSDK({
           if (cancelled) return;
           console.log('[useLinkusSDK] startSession', callId);
           dismissIncoming(callId);
+          const live = phoneRef.current?.sessions.get(callId);
+          if (live?.remoteStream) attachRemoteStream(live.remoteStream);
         });
 
         // ── Session removed (missed, rejected, hung up, etc.) ──
@@ -743,6 +835,10 @@ export function useLinkusSDK({
     }
   }, []);
 
+  const enableCallAudio = useCallback(() => {
+    void playRemoteAudio();
+  }, []);
+
   const attendedTransfer = useCallback((callId: string, number: string): boolean => {
     const phone = phoneRef.current;
     if (!phone?.getSession(callId)) return false;
@@ -781,6 +877,8 @@ export function useLinkusSDK({
     status,
     error,
     micPermission,
+    remoteAudioBlocked,
+    enableCallAudio,
     activeCalls: activeCallsList,
     activeCallByCallId,
     incomingCalls,

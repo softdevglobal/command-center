@@ -215,6 +215,8 @@ function ActiveCallCard({
   onHold,
   onMute,
   onBlindTransfer,
+  remoteAudioBlocked,
+  onEnableAudio,
 }: {
   call: ActiveCallInfo;
   now: number;
@@ -223,6 +225,8 @@ function ActiveCallCard({
   onMute: () => void;
   /** Returns whether the SDK accepted the blind transfer request. */
   onBlindTransfer: (toNumber: string) => boolean;
+  remoteAudioBlocked?: boolean;
+  onEnableAudio?: () => void;
 }) {
   const isConnected = call.callStatus === 'talking';
   const [xferOpen, setXferOpen] = useState(false);
@@ -319,6 +323,16 @@ function ActiveCallCard({
           )}
         </div>
       </div>
+
+      {isConnected && remoteAudioBlocked && (
+        <button
+          type="button"
+          onClick={onEnableAudio}
+          className="mb-2 w-full rounded-lg border border-amber-300 bg-amber-50 px-2 py-1.5 text-left text-xs font-medium text-amber-800 hover:bg-amber-100"
+        >
+          Click to enable call audio — the browser blocked speaker playback.
+        </button>
+      )}
 
       <div className="flex gap-2">
         {/* Hold / unhold */}
@@ -995,6 +1009,8 @@ export function SoftphoneWidget({
                       : sdk.mute(call.callId)
                   }
                   onBlindTransfer={(to) => sdk.blindTransfer(call.callId, to)}
+                  remoteAudioBlocked={sdk.remoteAudioBlocked}
+                  onEnableAudio={sdk.enableCallAudio}
                 />
               ))}
 
