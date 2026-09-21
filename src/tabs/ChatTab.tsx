@@ -17,6 +17,7 @@ import {
   Send,
   User,
   Users,
+  HeartHandshake,
   Volume2,
   VolumeX,
   X,
@@ -72,6 +73,7 @@ import {
   AUDIT_RESOURCE_BMS_CHAT,
 } from '@/services/auditLogApi';
 import { InternalChatTab } from '@/tabs/InternalChatTab';
+import { CarePlusSupportTab } from '@/tabs/CarePlusSupportTab';
 import { useDashboard } from '@/context/DashboardDataContext';
 
 interface ChatTabProps {
@@ -86,7 +88,7 @@ interface ChatTabProps {
   canViewBlueChat?: boolean;
 }
 
-type ChatView = SupportChatProduct | 'internal';
+type ChatView = SupportChatProduct | 'internal' | 'careplus';
 
 /** Sent automatically when opening a workshop thread from the picker (POST start-with-owner `text`). */
 const WORKSHOP_AUTO_OPEN_MESSAGE =
@@ -186,18 +188,20 @@ export function ChatTab({
   const supportProduct: SupportChatProduct =
     chatView === 'blue' ? 'blue' : 'black';
   const isInternalChat = chatView === 'internal';
+  const isCarePlusChat = chatView === 'careplus';
+  const isQueueChat = !isInternalChat && !isCarePlusChat;
 
   useEffect(() => {
-    if (isInternalChat) return;
+    if (!isQueueChat) return;
     const next = defaultSupportChatProduct(chatAccess);
     if (!next) return;
     setChatView((prev) => {
       if (prev === 'black' && chatAccess.canViewBlack) return prev;
       if (prev === 'blue' && chatAccess.canViewBlue && BLUE_SUPPORT_CHAT_ENABLED) return prev;
-      if (prev === 'internal') return prev;
+      if (prev === 'internal' || prev === 'careplus') return prev;
       return next;
     });
-  }, [chatAccess, isInternalChat]);
+  }, [chatAccess, isQueueChat]);
 
   const [queue, setQueue] = useState<Conversation[]>([]);
   const [mine, setMine] = useState<Conversation[]>([]);
@@ -371,7 +375,7 @@ export function ChatTab({
   );
 
   useEffect(() => {
-    if (isInternalChat) return;
+    if (!isQueueChat) return;
 
     setSelectedId(null);
     setMessages([]);
@@ -388,10 +392,10 @@ export function ChatTab({
     callCenterThreadIdsRef.current = new Set();
     skipInboxChimesRef.current = true;
     prevInboxSnapshotRef.current = new Map();
-  }, [supportProduct, isInternalChat]);
+  }, [supportProduct, isQueueChat]);
 
   useEffect(() => {
-    if (isInternalChat) return;
+    if (!isQueueChat) return;
 
     let cancelled = false;
 
@@ -416,7 +420,7 @@ export function ChatTab({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [loadConversations, isInternalChat]);
+  }, [loadConversations, isQueueChat]);
 
   useEffect(() => {
     if (loading) return;
@@ -455,9 +459,14 @@ export function ChatTab({
   }, [allConversations, loading, session.userId]);
 
   useEffect(() => {
-    if (!selectedId) {
-      setMessages([]);
-      setThreadError(null);
+    if (!isQueueChat || !selectedId) {
+      if (!isQueueChat) {
+        setMessages([]);
+        setThreadError(null);
+      } else if (!selectedId) {
+        setMessages([]);
+        setThreadError(null);
+      }
       return;
     }
 
@@ -549,10 +558,10 @@ export function ChatTab({
     return () => {
       cancelled = true;
     };
-  }, [selectedId, loadConversations, session, supportProduct]);
+  }, [selectedId, loadConversations, session, supportProduct, isQueueChat]);
 
   useEffect(() => {
-    if (!selectedId) {
+    if (!isQueueChat || !selectedId) {
       pendingWorkshopOwnerUidRef.current = null;
       setWorkshopName(null);
       setActiveWorkshopOwner(null);
@@ -569,26 +578,26 @@ export function ChatTab({
     } else {
       setActiveWorkshopOwner(null);
     }
-  }, [selectedId, allConversations, owners]);
+  }, [selectedId, allConversations, owners, isQueueChat]);
 
   useEffect(() => {
-    if (!selectedId) return;
+    if (!isQueueChat || !selectedId) return;
     const id = selectedId;
     const interval = setInterval(() => {
       void refreshThreadMessages(id);
     }, 5_000);
     return () => clearInterval(interval);
-  }, [selectedId, refreshThreadMessages]);
+  }, [selectedId, refreshThreadMessages, isQueueChat]);
 
   useEffect(() => {
-    if (!selectedId) return;
+    if (!isQueueChat || !selectedId) return;
     const id = selectedId;
     const onVisible = () => {
       if (document.visibilityState === 'visible') void refreshThreadMessages(id);
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [selectedId, refreshThreadMessages]);
+  }, [selectedId, refreshThreadMessages, isQueueChat]);
 
   const sortedMessages = useMemo(
     () =>
@@ -915,7 +924,7 @@ export function ChatTab({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <div className="flex items-center gap-1 self-start rounded-2xl bg-slate-100 p-1">
+      <div className="flex flex-wrap items-center gap-1 self-start rounded-2xl bg-slate-100 p-1">
         {chatAccess.canViewBlack && (
           <Button
             type="button"
@@ -980,9 +989,26 @@ export function ChatTab({
             </Badge>
           )}
         </Button>
+        <Button
+          type="button"
+          variant={isCarePlusChat ? 'secondary' : 'ghost'}
+          size="sm"
+          onClick={() => setChatView('careplus')}
+          className={cn(
+            'h-9 px-4 rounded-xl font-bold transition-all',
+            isCarePlusChat
+              ? 'bg-white text-rose-600 shadow-sm'
+              : 'text-slate-500 hover:text-slate-900',
+          )}
+        >
+          <HeartHandshake className="mr-2 h-4 w-4" />
+          Care Plus
+        </Button>
       </div>
 
-      {isInternalChat ? (
+      {isCarePlusChat ? (
+        <CarePlusSupportTab session={session} />
+      ) : isInternalChat ? (
         <InternalChatTab session={session} permissions={permissions} />
       ) : !hasAnyQueueChat ? (
         <Card className="border-border/80 bg-white shadow-sm">

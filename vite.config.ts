@@ -26,16 +26,24 @@ function parseLocalApiPaths(raw: string | undefined): string[] {
 
 
 
-function remoteProxyTarget(apiBase: string | undefined): string {
-
+function remoteProxyTarget(env: Record<string, string>): string {
   const fallback = "http://13.236.183.142:5050";
 
-  const base = (apiBase || fallback).trim().replace(/\/+$/, "");
+  // Prefer an explicit proxy host. VITE_API_BASE is the browser path (`/api`),
+  // not a hostname — using it as the proxy target strips to "" → ENOTFOUND base.invalid.
+  const explicit = (env.VITE_API_PROXY_TARGET || env.API_PROXY_TARGET || "")
+    .trim()
+    .replace(/\/+$/, "");
+  if (explicit) return explicit;
 
-  if (base.endsWith("/api")) return base.slice(0, -"/api".length);
+  // Legacy: VITE_API_BASE was sometimes a full URL like http://host:5050/api
+  const apiBase = (env.VITE_API_BASE || "").trim().replace(/\/+$/, "");
+  if (apiBase.startsWith("http://") || apiBase.startsWith("https://")) {
+    if (apiBase.endsWith("/api")) return apiBase.slice(0, -"/api".length);
+    return apiBase;
+  }
 
-  return base || fallback;
-
+  return fallback;
 }
 
 
@@ -52,7 +60,7 @@ export default defineConfig(({ mode }) => {
 
   );
 
-  const remoteTarget = remoteProxyTarget(env.VITE_API_BASE);
+  const remoteTarget = remoteProxyTarget(env);
 
 
 
@@ -110,9 +118,9 @@ export default defineConfig(({ mode }) => {
 
        * Proxy `/api/*` in dev. Paths in VITE_LOCAL_API_PATHS (or LOCAL_API_PATHS)
 
-       * go to localhost:5050; everything else uses VITE_API_BASE (EC2 by default).
+       * go to localhost:5050; everything else uses VITE_API_PROXY_TARGET
 
-       * Order matters — longer local prefixes are registered first.
+       * (falls back to EC2). Order matters — longer local prefixes first.
 
        */
 
