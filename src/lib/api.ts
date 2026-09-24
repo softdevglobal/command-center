@@ -29,13 +29,86 @@ export const DEFAULT_ACCESS_TOKEN_TTL_SEC = 4 * 60 * 60;
 
 export const DEFAULT_API_BASE = '/api';
 
-export const API_BASE =
-  (import.meta.env.VITE_API_BASE as string | undefined)?.trim().replace(/\/+$/, '') ||
-  DEFAULT_API_BASE;
+function envApiBase(): string | undefined {
+  const raw = (import.meta.env.VITE_API_BASE as string | undefined)?.trim().replace(/\/+$/, '');
+  return raw || undefined;
+}
+
+/**
+ * Browser API root. In Vite dev, always same-origin `/api` so requests go
+ * through the proxy in vite.config.ts. Calling the :5050 host from
+ * localhost:8080 is a cross-origin request, and that API does not send
+ * Access-Control-Allow-Origin for the dashboard origin.
+ */
+export const API_BASE = (() => {
+  const fromEnv = envApiBase();
+  if (
+    import.meta.env.DEV &&
+    fromEnv &&
+    (fromEnv.startsWith('http://') || fromEnv.startsWith('https://'))
+  ) {
+    return DEFAULT_API_BASE;
+  }
+  return fromEnv || DEFAULT_API_BASE;
+})();
+
+/** Dev-only: `/api/...` prefixes served from localhost:5050 (see VITE_LOCAL_API_PATHS). */
+function parseLocalApiPathPrefixes(): string[] {
+  const raw = (import.meta.env.VITE_LOCAL_API_PATHS as string | undefined)?.trim();
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((entry) => entry.trim().replace(/\/+$/, ''))
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length);
+}
+
+const LOCAL_API_PATH_PREFIXES = parseLocalApiPathPrefixes();
+
+function normalizeApiPath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) return '/api';
+  const withSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  if (withSlash === '/api' || withSlash.startsWith('/api/')) return withSlash;
+  return `/api${withSlash}`;
+}
+
+function usesRemoteApiBase(): boolean {
+  return API_BASE.startsWith('http://') || API_BASE.startsWith('https://');
+}
+
+/** True when this `/api/...` path should hit localhost via the Vite dev proxy. */
+export function shouldUseLocalDevProxy(apiPath: string): boolean {
+  if (!import.meta.env.DEV || !usesRemoteApiBase() || LOCAL_API_PATH_PREFIXES.length === 0) {
+    return false;
+  }
+  const normalized = normalizeApiPath(apiPath.split('?')[0] ?? apiPath);
+  return LOCAL_API_PATH_PREFIXES.some(
+    (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`),
+  );
+}
 
 export function apiUrl(path = ''): string {
+  const base = API_BASE.replace(/\/+$/, '');
   const suffix = path.trim() ? (path.startsWith('/') ? path : `/${path}`) : '';
-  return `${API_BASE}${suffix}`;
+
+  let relativePath: string;
+  if (base.endsWith('/api') && (suffix === '/api' || suffix.startsWith('/api/'))) {
+    relativePath = suffix === '/api' ? '/api' : suffix;
+  } else if (suffix === '/api' || suffix.startsWith('/api/')) {
+    relativePath = suffix;
+  } else {
+    relativePath = suffix ? `/api${suffix}` : '/api';
+  }
+
+  if (shouldUseLocalDevProxy(relativePath)) {
+    return relativePath;
+  }
+
+  if (base.endsWith('/api') && (suffix === '/api' || suffix.startsWith('/api/'))) {
+    return `${base}${suffix === '/api' ? '' : suffix.slice('/api'.length)}`;
+  }
+  return `${base}${suffix}`;
 }
 
 export const AUTH_STORAGE_KEYS = {
@@ -81,7 +154,10 @@ type ApiErrorBody = {
 
 type ApiFetchInit = RequestInit & {
   logoutOnUnauthorized?: boolean;
+  logoutOnSessionExpired?: boolean;
 };
+
+const SESSION_EXPIRED_STATUS_CODES = new Set([401, 403, 404]);
 
 function authUrl(path: string): string {
   return apiUrl(path);
@@ -93,6 +169,30 @@ function shouldPrefixApiBase(input: string): boolean {
     API_BASE.startsWith('/') &&
     (input === API_BASE || input.startsWith(`${API_BASE}/`))
   );
+}
+
+function resolveRequestUrl(input: string): string {
+  if (input.startsWith('http://') || input.startsWith('https://')) {
+    try {
+      const parsed = new URL(input);
+      if (shouldUseLocalDevProxy(parsed.pathname)) {
+        return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+      }
+      return input;
+    } catch {
+      return input;
+    }
+  }
+
+  if (input.startsWith('/') && !input.startsWith('//')) {
+    const pathOnly = input.split('?')[0] ?? input;
+    if (shouldUseLocalDevProxy(pathOnly)) {
+      return input;
+    }
+    return shouldPrefixApiBase(input) ? authUrl(input) : input;
+  }
+
+  return authUrl(input);
 }
 
 function safeJsonParse<T>(value: string | null): T | null {
@@ -260,7 +360,7 @@ export function authHeaders(): HeadersInit {
 }
 
 export async function login(email: string, password: string): Promise<LoginResponse> {
-  const res = await fetch(authUrl('/auth/login'), {
+  const res = await fetch(resolveRequestUrl('/auth/login'), {
     method: 'POST',
     headers: {
       Accept: 'application/json',
@@ -317,20 +417,22 @@ export function logout(
 }
 
 export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}): Promise<Response> {
-  const { logoutOnUnauthorized = false, ...fetchInit } = init;
+  const {
+    logoutOnUnauthorized = false,
+    logoutOnSessionExpired = true,
+    ...fetchInit
+  } = init;
 
   await ensureFreshAccessToken();
 
   const headers = new Headers(init.headers);
   const token = getAccessToken();
+  const hadAuthToken = Boolean(token);
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const url =
-    typeof input === 'string' && shouldPrefixApiBase(input)
-      ? authUrl(input)
-      : input;
+  const url = typeof input === 'string' ? resolveRequestUrl(input) : input;
 
   let res = await fetch(url, { ...fetchInit, headers });
   if (res.status === 401) {
@@ -343,10 +445,15 @@ export async function apiFetch(input: RequestInfo | URL, init: ApiFetchInit = {}
       }
       res = await fetch(url, { ...fetchInit, headers: retryHeaders });
     }
+  }
 
-    if (res.status === 401 && logoutOnUnauthorized) {
-      logout({ reason: 'session-expired' });
-    }
+  const shouldLogoutForStatus =
+    logoutOnSessionExpired &&
+    (SESSION_EXPIRED_STATUS_CODES.has(res.status) ||
+      (logoutOnUnauthorized && res.status === 401));
+
+  if (hadAuthToken && shouldLogoutForStatus) {
+    logout({ reason: 'session-expired' });
   }
   return res;
 }

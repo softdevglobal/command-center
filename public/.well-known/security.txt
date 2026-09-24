@@ -1,0 +1,4 @@
+Contact: mailto:security@bmspros.com.au
+Expires: 2027-08-13T00:00:00Z
+Preferred-Languages: en
+Canonical: https://commandcenter.bmspros.com.au/.well-known/security.txt

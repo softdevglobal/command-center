@@ -237,7 +237,7 @@ export function BookingFormDialog({
     } else {
       toast({
         title: 'Booking Failed',
-        description: 'Ensure you have valid Firebase credentials configured.',
+        description: 'Check your dashboard session and BMS workshop configuration.',
         variant: 'destructive',
       });
     }

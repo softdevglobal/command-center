@@ -1,6 +1,7 @@
 import { API_BASE, apiFetch, getAccessToken, logout } from '@/lib/api';
 
 export const BMS_BLACK_API_BASE = `${API_BASE}/bms-black`;
+export const BMS_BLACK_API_URL = BMS_BLACK_API_BASE;
 
 export type BmsBlackHttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
@@ -211,18 +212,35 @@ function buildUrl(path: string, query?: BmsBlackRequestOptions['query']): string
   return url.toString();
 }
 
-function requestHeaders(tenantId?: string | null): Headers {
-  const headers = new Headers({
-    'Content-Type': 'application/json',
-  });
+export function bmsBlackHeaders(
+  tenantId?: string | null,
+  initHeaders?: HeadersInit,
+): Headers {
+  const headers = new Headers(initHeaders);
+  if (!headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
 
   const token = getAccessToken();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
 
   const tenant = tenantId?.trim();
   if (tenant) headers.set('X-Tenant-Id', tenant);
 
   return headers;
+}
+
+export function bmsBlackFetch(
+  input: string,
+  init: RequestInit = {},
+  tenantId?: string | null,
+): Promise<Response> {
+  return apiFetch(input, {
+    ...init,
+    headers: bmsBlackHeaders(tenantId, init.headers),
+  });
 }
 
 async function readErrorDetail(res: Response): Promise<string> {
@@ -248,7 +266,7 @@ async function bmsBlackRequest<T>(
   const method = options.method ?? 'GET';
   const res = await apiFetch(buildUrl(path, options.query), {
     method,
-    headers: requestHeaders(options.tenantId),
+    headers: bmsBlackHeaders(options.tenantId),
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
 

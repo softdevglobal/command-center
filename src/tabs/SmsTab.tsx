@@ -239,7 +239,7 @@ function SmsContactList({
 }
 
 export function SmsTab({ session, currentAgentDbId = null, onInboxStatsChange }: SmsTabProps) {
-  const [section, setSection] = useState<SmsSection>('owners');
+  const [section, setSection] = useState<SmsSection>('customers');
   const [queues, setQueues] = useState<SmsQueue[]>([]);
   const [threads, setThreads] = useState<SmsThread[]>([]);
   const [selectedQueueId, setSelectedQueueId] = useState<string>('');
@@ -424,6 +424,12 @@ export function SmsTab({ session, currentAgentDbId = null, onInboxStatsChange }:
       ),
     [mineThreads, section, isOwnerThread],
   );
+
+  const hiddenInOtherSectionCount = useMemo(() => {
+    const inSection = (thread: SmsThread) =>
+      section === 'owners' ? isOwnerThread(thread) : !isOwnerThread(thread);
+    return threads.filter((thread) => !inSection(thread)).length;
+  }, [threads, section, isOwnerThread]);
 
   const selectedThreadDisplay = useMemo(
     () => (selectedThread ? threadDisplayFor(selectedThread, section === 'owners') : null),
@@ -1059,6 +1065,15 @@ export function SmsTab({ session, currentAgentDbId = null, onInboxStatsChange }:
           {error ? (
             <div className="mb-4 shrink-0 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
               {error}
+            </div>
+          ) : null}
+
+          {hiddenInOtherSectionCount > 0 ? (
+            <div className="mb-4 shrink-0 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              {hiddenInOtherSectionCount} conversation
+              {hiddenInOtherSectionCount === 1 ? '' : 's'} in the other tab (
+              {section === 'owners' ? 'Chat with customers' : 'Chat with owners'}). Switch tabs to
+              see them.
             </div>
           ) : null}
 

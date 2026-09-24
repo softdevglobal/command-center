@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { Agent, AgentShiftSchedule, UserSession } from "@/services/types";
+import { useMemo, useState, useEffect } from "react";
+import { Agent, AgentShiftSchedule, Queue, UserSession } from "@/services/types";
 import { fetchMyShiftSchedule } from "@/services/attendanceApi";
 import {
   Card,
@@ -14,6 +14,7 @@ import { toast } from "@/hooks/use-toast";
 interface AgentShiftScheduleViewProps {
   session: UserSession;
   agents: Agent[];
+  queues: Queue[];
 }
 
 const DAYS = [
@@ -26,9 +27,13 @@ const DAYS = [
   "sunday",
 ] as const;
 
-export function AgentShiftScheduleView({ session, agents }: AgentShiftScheduleViewProps) {
+export function AgentShiftScheduleView({ session, agents, queues }: AgentShiftScheduleViewProps) {
   const [loading, setLoading] = useState(true);
   const [schedule, setSchedule] = useState<AgentShiftSchedule | null>(null);
+  const queueNamesById = useMemo(
+    () => new Map(queues.map((queue) => [queue.id, queue.name])),
+    [queues],
+  );
 
   useEffect(() => {
     async function load() {
@@ -78,6 +83,8 @@ export function AgentShiftScheduleView({ session, agents }: AgentShiftScheduleVi
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
       {DAYS.map((day) => {
         const value = schedule[day];
+        const queueId = schedule.dayQueueIds?.[day] ?? null;
+        const queueName = queueId ? queueNamesById.get(queueId) : null;
         const isOff = !value || value.toLowerCase() === "off";
         
         return (
@@ -93,7 +100,7 @@ export function AgentShiftScheduleView({ session, agents }: AgentShiftScheduleVi
                 {isOff ? "OFF" : value}
               </div>
               <CardDescription>
-                {isOff ? "Relax and recharge" : "Working hours"}
+                {isOff ? "Relax and recharge" : queueName ? `Queue: ${queueName}` : "Working hours"}
               </CardDescription>
             </CardContent>
           </Card>

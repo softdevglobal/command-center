@@ -1090,10 +1090,6 @@ export default function BookingPage() {
           bms_status: "Pending",
           bms_response: result,
         });
-        // console.log(
-        //   "[Supabase] Booking saved locally with agent:",
-        //   firebaseUser?.email,
-        // );
       } catch (sbErr) {
         // Don't fail the whole flow if Supabase save fails — BMS booking already created
         // console.warn("[Supabase] Failed to save local booking copy:", sbErr);

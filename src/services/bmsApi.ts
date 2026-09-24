@@ -12,7 +12,7 @@ import {
   BMS_BLACK_API_URL,
   bmsBlackFetch,
   bmsBlackHeaders,
-} from '@/services/bmsBlackApi';
+} from '@/lib/bms-black-api';
 
 const BASE_URL = BMS_BLACK_API_URL;
 
@@ -162,21 +162,21 @@ export function bmsApi(ownerUid?: string | null) {
   const getAgent = () =>
     request<{ uid: string; name: string; role: string; assignedWorkshops: string[] }>(
       '/auth',
-      { },
+      { tenant },
     );
 
   /* ── Workshops ── */
   const getWorkshops = () =>
-    request<BmsWorkshop[]>('/workshops', { });
+    request<BmsWorkshop[]>('/workshops', { tenant });
 
   const getWorkshop = (uid: string) =>
-    request<BmsWorkshop>(`/workshops/${uid}`, { });
+    request<BmsWorkshop>(`/workshops/${uid}`, { tenant });
 
   /* ── DID Lookup ── */
   const didLookup = (did: string) =>
     request<{ ownerUid: string; branchId?: string; label?: string }>(
       `/did-lookup?did=${encodeURIComponent(did)}`,
-      { },
+      { tenant },
     );
 
   /* ── Services ── */
@@ -216,10 +216,12 @@ export function bmsApi(ownerUid?: string | null) {
     request<BmsCustomer>('/customers', {
       method: 'POST',
       body: JSON.stringify(payload),
+      tenant,
     });
 
   const getCustomerVehicles = (customerId: string) =>
     request<unknown[]>(`/customers/${customerId}/vehicles?ownerUid=${tenant ?? ''}`, {
+      tenant,
     });
 
   /* ── Bookings ── */
@@ -275,14 +277,14 @@ export function bmsApi(ownerUid?: string | null) {
     if (params?.branchId) q.set('branchId', params.branchId);
     if (params?.customerId) q.set('customerId', params.customerId);
     if (params?.limit) q.set('limit', String(params.limit));
-    return request<BmsBooking[]>(`/getallbooking?${q}`, { });
+    return request<BmsBooking[]>(`/getallbooking?${q}`, { tenant });
   };
 
   /* ── Additional Issues ── */
   const getAdditionalIssues = (bookingId: string) =>
     request<BmsAdditionalIssue[]>(
       `/bookings/${bookingId}/additional-issues`,
-      { },
+      { tenant },
     );
 
   const respondToIssue = (
@@ -295,6 +297,7 @@ export function bmsApi(ownerUid?: string | null) {
       {
         method: 'PATCH',
         body: JSON.stringify({ customerResponse }),
+        tenant,
       },
     );
 
@@ -303,6 +306,7 @@ export function bmsApi(ownerUid?: string | null) {
     request<{ id: string }>('/call-logs', {
       method: 'POST',
       body: JSON.stringify(payload),
+      tenant,
     });
 
   const getCallLogs = (params?: {
@@ -314,7 +318,7 @@ export function bmsApi(ownerUid?: string | null) {
     if (params?.customerId) q.set('customerId', params.customerId);
     if (params?.bookingId) q.set('bookingId', params.bookingId);
     if (params?.limit) q.set('limit', String(params.limit));
-    return request<unknown[]>(`/call-logs?${q}`, { });
+    return request<unknown[]>(`/call-logs?${q}`, { tenant });
   };
 
   return {

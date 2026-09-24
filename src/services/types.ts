@@ -85,6 +85,8 @@ export interface Agent {
 
 export interface Call {
   id: string;
+  /** PBX call / recording identifier, shown in Yeastar reports. */
+  pbxCallId?: string | null;
   tenantId: string;
   queueId: string;
   agentId: string | null;
@@ -95,6 +97,8 @@ export interface Call {
   callerName: string | null;
   /** Tenant inbound DID — the number the caller dialled to reach this tenant (Yeastar CDR). */
   dialedNumber: string | null;
+  /** Raw Yeastar "Call To" value, e.g. `CJ<1010>` or a queue/extension label. */
+  callToExtension?: string | null;
   startTime: string;
   answerTime: string | null;
   endTime: string | null;
@@ -246,6 +250,19 @@ export interface AgentShiftSchedule {
   agentId: string;
   /** Supabase auth user id when the API includes it for agent-scoped reads. */
   userId?: string | null;
+  /** Queue assigned for each scheduled day. Null/empty means no queue assigned. */
+  dayQueueIds?: Partial<
+    Record<
+      | "monday"
+      | "tuesday"
+      | "wednesday"
+      | "thursday"
+      | "friday"
+      | "saturday"
+      | "sunday",
+      string | null
+    >
+  >;
   monday: string | null;
   tuesday: string | null;
   wednesday: string | null;

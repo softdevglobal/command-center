@@ -10,7 +10,11 @@ import Index from "./pages/Index.tsx";
 import LoginPage from "./pages/LoginPage.tsx";
 import BookingPage from "./pages/BookingPage.tsx";
 import BookingDetailsPage from "./pages/BookingDetailsPage.tsx";
+import TradeInspectionRequestsPage from "./pages/TradeInspectionRequestsPage.tsx";
+import TradeInspectionRequestCreatePage from "./pages/TradeInspectionRequestCreatePage.tsx";
 import NotFound from "./pages/NotFound.tsx";
+
+import { AppProviders } from "./components/AppProviders";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -20,40 +24,40 @@ const queryClient = new QueryClient({
   },
 });
 
-import { AppProviders } from "./components/AppProviders";
-
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <BrowserRouter>
         <AuthProvider>
-            <Toaster />
-            <AuthSessionExpiredNotice />
-            <Sonner />
-            <Routes>
-              <Route path="/login" element={<LoginPage />} />
-              <Route element={<ProtectedRoute requireSuperAdmin />}>
-                <Route element={<AppProviders />}>
-                  <Route path="/admin" element={<Index />} />
-                </Route>
+          <Toaster />
+          <AuthSessionExpiredNotice />
+          <Sonner />
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route element={<ProtectedRoute requireSuperAdmin />}>
+              <Route element={<AppProviders />}>
+                <Route path="/admin" element={<Index />} />
               </Route>
-              <Route element={<ProtectedRoute />}>
-                <Route element={<AppProviders />}>
-                  <Route path="/" element={<Index />} />
-                  <Route path="/agent" element={<Index />} />
-                  <Route path="/dashboard" element={<Index />} />
-                  <Route path="/booking" element={<BookingPage />} />
-                  <Route path="/bookings/dashboard" element={<BookingDetailsPage />} />
-                  <Route path="/bookings/pending" element={<BookingDetailsPage />} />
-                  <Route path="/bookings/confirmed" element={<BookingDetailsPage />} />
-                  <Route path="/bookings/completed" element={<BookingDetailsPage />} />
-                  <Route path="/bookings/cancelled" element={<BookingDetailsPage />} />
-                  <Route path="/bookings/:id" element={<BookingDetailsPage />} />
-                </Route>
+            </Route>
+            <Route element={<ProtectedRoute />}>
+              <Route element={<AppProviders />}>
+                <Route path="/" element={<Index />} />
+                <Route path="/agent" element={<Index />} />
+                <Route path="/dashboard" element={<Index />} />
+                <Route path="/booking" element={<BookingPage />} />
+                <Route path="/trade" element={<TradeInspectionRequestsPage />} />
+                <Route path="/trade/create" element={<TradeInspectionRequestCreatePage />} />
+                <Route path="/bookings/dashboard" element={<BookingDetailsPage />} />
+                <Route path="/bookings/pending" element={<BookingDetailsPage />} />
+                <Route path="/bookings/confirmed" element={<BookingDetailsPage />} />
+                <Route path="/bookings/completed" element={<BookingDetailsPage />} />
+                <Route path="/bookings/cancelled" element={<BookingDetailsPage />} />
+                <Route path="/bookings/:id" element={<BookingDetailsPage />} />
               </Route>
-              {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-              <Route path="*" element={<NotFound />} />
-            </Routes>
+            </Route>
+            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+            <Route path="*" element={<NotFound />} />
+          </Routes>
         </AuthProvider>
       </BrowserRouter>
     </TooltipProvider>

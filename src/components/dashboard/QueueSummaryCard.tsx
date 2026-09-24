@@ -111,7 +111,7 @@ export function QueueSummaryCard({
   return (
     <Card
       className={`group relative flex flex-col overflow-hidden bg-white transition-all duration-300 ${
-        showCallerRows ? 'h-[500px]' : ''
+        showCallerRows ? 'h-[450px]' : ''
       } ${
         interactive ? 'cursor-pointer hover:-translate-y-1 hover:shadow-xl' : 'shadow-sm'
       } ${isIncoming || showLive || showEndedCallerRecall ? 'ring-2 ring-offset-2 shadow-lg' : 'border-border/80'}`}

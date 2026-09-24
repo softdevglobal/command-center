@@ -9,10 +9,12 @@ import {
   Mail,
   MapPin,
   MessageSquare,
+  Paperclip,
   Send,
   StickyNote,
   UserRound,
   Wrench,
+  X,
 } from "lucide-react";
 import type {
   Agent,
@@ -24,7 +26,14 @@ import type {
   VehicleRecord,
   WorkshopUserRole,
 } from "@/services/types";
-import { fetchAgentByCallerNumber } from "@/services/dashboardApi";
+import {
+  fetchAgentByCallerNumber,
+  findCallRecordingByCallId,
+} from "@/services/dashboardApi";
+import {
+  getRecordingBytes,
+  recordingExtensionForMime,
+} from "@/services/yeastarService";
 import { fetchCallerContextByPhone } from "@/services/customersApi";
 import { getDIDMappingByDid } from "@/services/didMappingsApi";
 import {
@@ -55,6 +64,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/useAuth";
 import { sendBlueCallNote } from "@/services/blueNotesApi";
+import {
+  saveBlackCallActivity,
+  type BlackCallRecordingFile,
+} from "@/services/blackNotesApi";
 
 type CallSheetMode = "incoming" | "live";
 export type CallQueueKind = "black" | "blue";
@@ -82,6 +95,7 @@ export interface CallDetailSnapshot {
 
 // ?? SessionStorage persistence for call detail across page navigation ??
 const CALL_DETAIL_STORAGE_KEY = 'cc_active_call_detail';
+const BLUE_INSPECTION_REQUEST_PATH = "/trade";
 
 export function saveCallDetailToSession(detail: CallDetailSnapshot): void {
   try {
@@ -182,7 +196,7 @@ export function buildLiveCallSnapshot(args: {
   const queueName = incomingCall?.queueName || queue?.name || agent.queueName || "Live Queue";
 
   return {
-    id: agent.id,
+    id: incomingCall?.id ?? agent.id,
     mode: "live",
     tenantId: agent.tenantId,
     queueId,
@@ -194,7 +208,7 @@ export function buildLiveCallSnapshot(args: {
       name: queueName,
       type: queue?.type,
     }),
-    agentOrGroupLabel: `Agent: ${agent.name}${agent.extension ? ` ? Ext ${agent.extension}` : ""}`,
+    agentOrGroupLabel: `Agent: ${agent.name}${agent.extension ? ` - Ext ${agent.extension}` : ""}`,
     customerPhone: activeNumber,
     customerName: incomingCall?.callerName ?? null,
     did: incomingCall?.did || "",
@@ -217,7 +231,7 @@ export function CallDetailsSheet({
   onOpenChange,
 }: CallDetailsSheetProps) {
   const navigate = useNavigate();
-  const { session } = useAuth();
+  const { session, permissions } = useAuth();
   const [callerContext, setCallerContext] = useState<CallerContext | null>(
     null,
   );
@@ -236,6 +250,16 @@ export function CallDetailsSheet({
   const [blueNoteSending, setBlueNoteSending] = useState(false);
   const [blueNoteMessage, setBlueNoteMessage] = useState<string | null>(null);
   const [blueNoteError, setBlueNoteError] = useState<string | null>(null);
+  const [blackNote, setBlackNote] = useState("");
+  const [blackNoteSaving, setBlackNoteSaving] = useState(false);
+  const [blackNoteMessage, setBlackNoteMessage] = useState<string | null>(null);
+  const [blackNoteError, setBlackNoteError] = useState<string | null>(null);
+  const [blackRecording, setBlackRecording] = useState<{
+    recordingUrl: string;
+    recordingCallId: string;
+  } | null>(null);
+  const [blackRecordingLoading, setBlackRecordingLoading] = useState(false);
+  const [blackRecordingError, setBlackRecordingError] = useState<string | null>(null);
   const [workshopChatOpen, setWorkshopChatOpen] = useState(false);
   const [workshopChatId, setWorkshopChatId] = useState<string | null>(null);
   const [workshopChatMessages, setWorkshopChatMessages] = useState<ChatMessage[]>([]);
@@ -444,6 +468,13 @@ export function CallDetailsSheet({
     setBlueNoteMessage(null);
     setBlueNoteError(null);
     setBlueNoteSending(false);
+    setBlackNote("");
+    setBlackNoteMessage(null);
+    setBlackNoteError(null);
+    setBlackNoteSaving(false);
+    setBlackRecording(null);
+    setBlackRecordingLoading(false);
+    setBlackRecordingError(null);
   }, [detail?.id, open]);
 
   useEffect(() => {
@@ -538,6 +569,28 @@ export function CallDetailsSheet({
   const businessName =
     (activeDetail.mappingWorkshopName || activeDetail.workshopName || "Unknown business") +
     (activeDetail.branchName ? ` - ${activeDetail.branchName}` : "");
+
+  function handleCreateBlueInspectionRequest() {
+    saveCallDetailToSession(activeDetail);
+    navigate(BLUE_INSPECTION_REQUEST_PATH, {
+      state: {
+        source: "blue-call-inspection-request",
+        callId: activeDetail.id,
+        customerName: resolvedCustomerName,
+        callerNumber: activeDetail.customerPhone,
+        businessId: activeDetail.ownerId || "",
+        businessName,
+        did: activeDetail.did || activeDetail.didLabel,
+        didLabel: activeDetail.didLabel,
+        queueId: activeDetail.queueId,
+        queueName: activeDetail.queueName,
+        tenantId: activeDetail.tenantId,
+        ownerId: activeDetail.ownerId || "",
+        agentUserId: session?.userId ?? null,
+        agentName: session?.displayName ?? null,
+      },
+    });
+  }
 
   async function handleOpenWorkshopChat() {
     const ownerUid = activeDetail.ownerId.trim();
@@ -645,6 +698,124 @@ export function CallDetailsSheet({
       );
     } finally {
       setBlueNoteSending(false);
+    }
+  }
+
+  async function handleAttachBlackRecording() {
+    if (isBlueCall || blackRecordingLoading) return;
+    if (!activeDetail.id?.trim()) {
+      setBlackRecordingError("No call id is available for this call.");
+      return;
+    }
+
+    setBlackRecordingError(null);
+    setBlackRecordingLoading(true);
+
+    try {
+      const found = await findCallRecordingByCallId(
+        activeDetail.id,
+        activeDetail.tenantId,
+      );
+      if (!found) {
+        setBlackRecordingError(
+          "No recording is available yet for this call. Recordings appear shortly after the call ends - try again in a moment.",
+        );
+        return;
+      }
+
+      setBlackRecording({
+        recordingUrl: found.recordingUrl,
+        recordingCallId: found.callId,
+      });
+      setBlackNoteMessage(null);
+    } catch (err) {
+      setBlackRecordingError(
+        err instanceof Error ? err.message : "Failed to find the recording.",
+      );
+    } finally {
+      setBlackRecordingLoading(false);
+    }
+  }
+
+  async function handleBlackNoteSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (isBlueCall) return;
+
+    const note = blackNote.trim();
+    if (!note) {
+      setBlackNoteError("Add a note before saving.");
+      setBlackNoteMessage(null);
+      return;
+    }
+
+    const ownerId = activeDetail.ownerId.trim();
+    const branchId = activeDetail.branchId.trim();
+    if (!ownerId || !branchId) {
+      setBlackNoteError(
+        mappingLoading
+          ? "DID mapping is still loading. Try saving again in a moment."
+          : "Cannot save note because this call has no owner or branch mapping.",
+      );
+      setBlackNoteMessage(null);
+      return;
+    }
+
+    setBlackNoteSaving(true);
+    setBlackNoteError(null);
+    setBlackNoteMessage(null);
+
+    try {
+      const payload = {
+        callId: activeDetail.id,
+        agentName: session?.displayName?.trim() || "Unknown agent",
+        agentUserId: session?.userId ?? null,
+        callerNumber: activeDetail.customerPhone,
+        callerName: resolvedCustomerName,
+        agentNote: note,
+        didNumber: activeDetail.did || activeDetail.didLabel,
+        ownerId,
+        branchId,
+        branchName: activeDetail.branchName || null,
+        queueId: activeDetail.queueId,
+        queueName: activeDetail.queueName,
+        tenantId: activeDetail.tenantId,
+        sourceRecordingUrl: blackRecording?.recordingUrl ?? null,
+        recordingCallId: blackRecording?.recordingCallId ?? null,
+      };
+
+      let recordingFile: BlackCallRecordingFile | null = null;
+      if (blackRecording) {
+        setBlackNoteMessage("Downloading recording for upload...");
+        const { buf, mime } = await getRecordingBytes(blackRecording.recordingUrl);
+        const ext = recordingExtensionForMime(mime);
+        recordingFile = {
+          blob: new Blob([buf], { type: mime || "audio/wav" }),
+          fileName: `recording-${blackRecording.recordingCallId}.${ext}`,
+          sourceRecordingUrl: blackRecording.recordingUrl,
+          recordingCallId: blackRecording.recordingCallId,
+        };
+      }
+
+      setBlackNoteMessage(
+        recordingFile ? "Uploading note and recording..." : "Saving note...",
+      );
+      await saveBlackCallActivity(payload, recordingFile);
+
+      setBlackNote("");
+      setBlackRecording(null);
+      setBlackRecordingError(null);
+      setBlackNoteMessage(
+        recordingFile
+          ? "Note and recording saved to agent activities."
+          : "Note saved to agent activities.",
+      );
+    } catch (err) {
+      setBlackNoteError(
+        err instanceof Error ? err.message : "Failed to save call note.",
+      );
+      setBlackNoteMessage(null);
+    } finally {
+      setBlackNoteSaving(false);
     }
   }
 
@@ -813,6 +984,35 @@ export function CallDetailsSheet({
 
               {isBlueCall ? (
                 <>
+                  <Card className="border-blue-200 bg-blue-50/70 shadow-sm ring-1 ring-blue-100">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="flex items-center gap-2 text-base text-blue-950">
+                        <Wrench className="h-4 w-4 text-blue-600" />
+                        Inspection request
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4 pt-0">
+                      <p className="text-sm text-blue-900/80">
+                        Open Trade to load all inspection requests for the mapped Blue
+                        business. New requests are created from the inspection requests page.
+                      </p>
+                      {!activeDetail.ownerId && !mappingLoading ? (
+                        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                          No Blue business id is mapped to this DID yet.
+                        </div>
+                      ) : null}
+                      <Button
+                        type="button"
+                        className="bg-blue-600 text-white hover:bg-blue-700"
+                        onClick={handleCreateBlueInspectionRequest}
+                        disabled={mappingLoading || !activeDetail.ownerId}
+                      >
+                        <Wrench className="h-4 w-4" />
+                        View inspection requests
+                      </Button>
+                    </CardContent>
+                  </Card>
+
                   <Card className="border-blue-200 bg-white shadow-sm ring-1 ring-blue-100">
                     <CardHeader className="pb-3">
                       <CardTitle className="flex items-center gap-2 text-base text-blue-950">
@@ -860,12 +1060,128 @@ export function CallDetailsSheet({
                   </Card>
 
                   <div className="rounded-2xl border border-dashed border-blue-200 bg-blue-50/60 px-4 py-3 text-sm text-blue-900">
-                    This Blue queue view is notes-only. Booking commands and
-                    booking history are hidden for this queue.
+                    Booking commands and booking history are hidden for this Blue queue. Use the
+                    inspection request action to continue in Trade.
                   </div>
                 </>
               ) : (
                 <>
+                  <Card className="border-emerald-200 bg-white shadow-sm ring-1 ring-emerald-100">
+                    <CardHeader className="pb-3">
+                      <CardTitle className="flex items-center gap-2 text-base text-emerald-950">
+                        <StickyNote className="h-4 w-4 text-emerald-600" />
+                        Black call note
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <form className="space-y-4" onSubmit={handleBlackNoteSubmit}>
+                        <Textarea
+                          value={blackNote}
+                          onChange={(event) => {
+                            setBlackNote(event.target.value);
+                            setBlackNoteError(null);
+                            setBlackNoteMessage(null);
+                          }}
+                          placeholder="Type the agent note for this caller..."
+                          className="min-h-[150px] resize-y bg-white"
+                          disabled={blackNoteSaving}
+                        />
+                        <div className="grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+                          <div>
+                            DID:{" "}
+                            <span className="font-mono text-slate-700">
+                              {activeDetail.did || activeDetail.didLabel || "-"}
+                            </span>
+                          </div>
+                          <div>
+                            Workshop / Branch:{" "}
+                            <span className="text-slate-700">
+                              {activeDetail.mappingWorkshopName ||
+                                activeDetail.workshopName ||
+                                (mappingLoading ? "Loading..." : "-")}{" "}
+                              /{" "}
+                              {activeDetail.branchName ||
+                                (mappingLoading ? "Loading..." : "-")}
+                            </span>
+                          </div>
+                        </div>
+
+                        {permissions.canViewCallRecordings ? (
+                          <div className="space-y-2">
+                            {blackRecording ? (
+                              <div className="flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                                <span className="flex min-w-0 items-center gap-2">
+                                  <Paperclip className="h-3.5 w-3.5 shrink-0" />
+                                  <span className="truncate">
+                                    Recording linked ({blackRecording.recordingCallId})
+                                  </span>
+                                </span>
+                                <button
+                                  type="button"
+                                  className="shrink-0 rounded-full p-1 text-emerald-700 hover:bg-emerald-100"
+                                  onClick={() => {
+                                    setBlackRecording(null);
+                                    setBlackRecordingError(null);
+                                  }}
+                                  disabled={blackNoteSaving}
+                                  title="Remove recording"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            ) : (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="gap-1.5 bg-white"
+                                onClick={() => void handleAttachBlackRecording()}
+                                disabled={blackRecordingLoading || blackNoteSaving}
+                              >
+                                {blackRecordingLoading ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <Paperclip className="h-3.5 w-3.5" />
+                                )}
+                                {blackRecordingLoading
+                                  ? "Finding recording..."
+                                  : "Attach call recording"}
+                              </Button>
+                            )}
+                            {blackRecordingError ? (
+                              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                                {blackRecordingError}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+
+                        {blackNoteError ? (
+                          <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                            {blackNoteError}
+                          </div>
+                        ) : null}
+                        {blackNoteMessage ? (
+                          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                            {blackNoteMessage}
+                          </div>
+                        ) : null}
+                        <Button
+                          type="submit"
+                          className="bg-emerald-600 text-white hover:bg-emerald-700"
+                          disabled={blackNoteSaving || mappingLoading}
+                        >
+                          {blackNoteSaving ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <StickyNote className="h-4 w-4" />
+                          )}
+                          Save note
+                        </Button>
+                      </form>
+                    </CardContent>
+                  </Card>
+
                   {callerContext?.customer.notes && (
                     <Card className="border-slate-200 bg-white shadow-sm">
                       <CardHeader className="pb-3">
