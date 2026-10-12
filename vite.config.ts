@@ -27,7 +27,7 @@ function parseLocalApiPaths(raw: string | undefined): string[] {
 
 
 function remoteProxyTarget(env: Record<string, string>): string {
-  const fallback = "http://13.236.183.142:5050";
+  const fallback = "https://command-api.bmspros.com.au";
 
   // Prefer an explicit proxy host. VITE_API_BASE is the browser path (`/api`),
   // not a hostname — using it as the proxy target strips to "" → ENOTFOUND base.invalid.
@@ -86,7 +86,7 @@ export default defineConfig(({ mode }) => {
 
     changeOrigin: true,
 
-    secure: false,
+    secure: true,
 
   };
 

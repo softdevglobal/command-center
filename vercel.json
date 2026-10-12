@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "http://13.236.183.142:5050/api/:path*"
+      "destination": "https://command-api.bmspros.com.au/api/:path*"
     },
     {
       "source": "/((?!.*\\.).*)",
