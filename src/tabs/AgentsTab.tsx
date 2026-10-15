@@ -29,6 +29,8 @@ import { updateAgent, deleteAgent } from '@/services/agentApis';
 import { fetchBmsWorkshopOptions } from '@/services/didMappingsApi';
 import { Pencil, Trash2, MessageSquare } from 'lucide-react';
 import { useDashboard } from '@/context/DashboardDataContext';
+import { useAuthContext } from '@/context/AuthContext';
+import { AiAgentAccountsModal } from '@/components/dashboard/AiAgentAccountsModal';
 
 const AGENT_ROLES: Agent['role'][] = ['agent', 'senior-agent', 'team-lead'];
 const ROLE_LABELS: Record<Agent['role'], string> = {
@@ -50,6 +52,8 @@ type AgentGroupTab = 'command-centre' | 'workshop';
 
 export function AgentsTab({ agents, queues, tenants, permissions, now, onRefresh }: AgentsTabProps) {
   const { startInternalChat } = useDashboard();
+  const { session } = useAuthContext();
+  const [aiAccountsOpen, setAiAccountsOpen] = useState(false);
   const [agentGroupTab, setAgentGroupTab] = useState<AgentGroupTab>('command-centre');
   const [filterWorkshopOwnerUid, setFilterWorkshopOwnerUid] = useState('all');
   const [filterQueue, setFilterQueue] = useState('all');
@@ -267,6 +271,12 @@ export function AgentsTab({ agents, queues, tenants, permissions, now, onRefresh
 
   return (
     <div className="cc-fade-in space-y-6">
+      {session?.role === 'super-admin' && <>
+        <div className="flex justify-end">
+          <Button variant="outline" onClick={() => setAiAccountsOpen(true)}>AI Receptionist Accounts</Button>
+        </div>
+        <AiAgentAccountsModal open={aiAccountsOpen} onClose={() => setAiAccountsOpen(false)} />
+      </>}
       <Card className="border-border/80 bg-white shadow-sm">
         <CardContent className="space-y-5 p-5">
           <div>
