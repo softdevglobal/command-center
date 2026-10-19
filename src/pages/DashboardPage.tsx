@@ -47,6 +47,9 @@ const AttendanceTab = lazy(() =>
 const AuditLogsTab = lazy(() =>
   import('@/tabs/AuditLogsTab').then((m) => ({ default: m.AuditLogsTab })),
 );
+const AiAgentActivityTab = lazy(() =>
+  import('@/tabs/AiAgentActivityTab').then((m) => ({ default: m.AiAgentActivityTab })),
+);
 const ChatTab = lazy(() => import('@/tabs/ChatTab').then((m) => ({ default: m.ChatTab })));
 const SmsTab = lazy(() => import('@/tabs/SmsTab').then((m) => ({ default: m.SmsTab })));
 const DIDMappingsTab = lazy(() =>
@@ -188,6 +191,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
       if (key === 'sip') return permissions.canViewSipTab;
       if (key === 'clients') return permissions.canViewClientsTab;
       if (key === 'did-mappings') return permissions.canManageDIDMappings;
+      if (key === 'ai-agent-activity') return permissions.canViewAuditLogs;
       if (key === 'audit-logs') return permissions.canViewAuditLogs;
       if (key === 'attendance' || key === 'leave-requests' || key === 'shift-schedule') return permissions.canViewAttendanceTab;
       if (
@@ -775,6 +779,9 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
               )}
               {d.selectedTab === 'audit-logs' && (
                 <AuditLogsTab />
+              )}
+              {d.selectedTab === 'ai-agent-activity' && (
+                <AiAgentActivityTab />
               )}
               {d.selectedTab === 'sales-suburbs' && (
                 <SalesAgentSuburbAssignmentTab

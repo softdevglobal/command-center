@@ -5,6 +5,7 @@ import {
   AlarmClock,
   Building2,
   BookOpen,
+  Bot,
   CalendarClock,
   CalendarOff,
   CheckCheck,
@@ -114,6 +115,7 @@ const NAV_ITEMS: SidebarEntry[] = [
     ],
   },
   { kind: 'item', key: 'did-mappings', label: 'DID Mappings', icon: PhoneForwarded, perm: 'canManageDIDMappings' },
+  { kind: 'item', key: 'ai-agent-activity', label: 'AI Agent Activity', icon: Bot, perm: 'canViewAuditLogs' },
   { kind: 'item', key: 'audit-logs', label: 'Audit Logs', icon: History, perm: 'canViewAuditLogs' },
 ];
 
