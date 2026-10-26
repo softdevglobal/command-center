@@ -18,6 +18,7 @@ import {
   ListTodo,
   LogOut,
   MapPin,
+  Mail,
   MessageSquare,
   MessageSquareText,
   Phone,
@@ -116,6 +117,7 @@ const NAV_ITEMS: SidebarEntry[] = [
   },
   { kind: 'item', key: 'did-mappings', label: 'DID Mappings', icon: PhoneForwarded, perm: 'canManageDIDMappings' },
   { kind: 'item', key: 'ai-agent-activity', label: 'AI Agent Activity', icon: Bot, perm: 'canViewAuditLogs' },
+  { kind: 'item', key: 'sophie-inbox', label: 'Sophie Inbox', icon: Mail, perm: 'canViewAuditLogs' },
   { kind: 'item', key: 'audit-logs', label: 'Audit Logs', icon: History, perm: 'canViewAuditLogs' },
 ];
 
