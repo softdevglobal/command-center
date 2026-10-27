@@ -58,7 +58,7 @@ type SidebarGroup = {
   label: string;
   icon: LucideIcon;
   perm: Perm;
-  items: { key: string; label: string; icon: LucideIcon }[];
+  items: { key: string; label: string; icon: LucideIcon; perm?: Perm }[];
 };
 
 type SidebarEntry = SidebarLeaf | SidebarGroup;
@@ -84,6 +84,7 @@ const NAV_ITEMS: SidebarEntry[] = [
     items: [
       { key: 'agents', label: 'Directory', icon: Users },
       { key: 'agent-performance', label: 'Performance', icon: Activity },
+      { key: 'ai-receptionist-accounts', label: 'AI Receptionists', icon: Bot, perm: 'canManageAgents' },
     ],
   },
   { kind: 'item', key: 'agent-onboarding', label: 'Agent Onboarding', icon: UserPlus, perm: 'canViewAgentOnboardingTab' },
@@ -138,7 +139,7 @@ export default function DashboardSidebar({
 
   useEffect(() => {
     for (const entry of NAV_ITEMS) {
-      if (entry.kind === 'group' && entry.items.some((i) => i.key === selectedTab)) {
+      if (entry.kind === 'group' && entry.items.some((i) => i.key === selectedTab && (!i.perm || permissions[i.perm]))) {
         setExpandedGroups((prev) => {
           if (prev.has(entry.label)) return prev;
           const next = new Set(prev);
@@ -148,7 +149,7 @@ export default function DashboardSidebar({
         break;
       }
     }
-  }, [selectedTab]);
+  }, [selectedTab, permissions]);
 
   const visibleNav = NAV_ITEMS.filter((entry) => permissions[entry.perm]);
 
@@ -217,7 +218,8 @@ export default function DashboardSidebar({
                 );
               }
 
-              const groupActive = entry.items.some((i) => i.key === selectedTab);
+              const visibleItems = entry.items.filter((item) => !item.perm || permissions[item.perm]);
+              const groupActive = visibleItems.some((i) => i.key === selectedTab);
               const GroupIcon = entry.icon;
               return (
                 <div key={entry.label} className="ml-3 w-[calc(100%-0.75rem)] space-y-0.5">
@@ -250,7 +252,7 @@ export default function DashboardSidebar({
                   </button>
                   {expandedGroups.has(entry.label) && (
                     <div className="ml-1 space-y-0.5 border-l border-neutral-700 pl-2">
-                      {entry.items.map((item) => {
+                      {visibleItems.map((item) => {
                         const SubIcon = item.icon;
                         const active = selectedTab === item.key;
                         const isLeaveItem = item.key === 'leave-requests';
