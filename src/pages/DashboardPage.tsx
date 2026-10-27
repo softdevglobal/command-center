@@ -31,6 +31,9 @@ const AgentsTab = lazy(() =>
 const AgentPerformanceTab = lazy(() =>
   import('@/tabs/AgentPerformanceTab').then((m) => ({ default: m.AgentPerformanceTab })),
 );
+const AiReceptionistAccountsTab = lazy(() =>
+  import('@/tabs/AiReceptionistAccountsTab').then((m) => ({ default: m.AiReceptionistAccountsTab })),
+);
 const CallsTab = lazy(() => import('@/tabs/CallsTab').then((m) => ({ default: m.CallsTab })));
 const SipLinesTab = lazy(() =>
   import('@/tabs/SipLinesTab').then((m) => ({ default: m.SipLinesTab })),
@@ -49,6 +52,9 @@ const AuditLogsTab = lazy(() =>
 );
 const AiAgentActivityTab = lazy(() =>
   import('@/tabs/AiAgentActivityTab').then((m) => ({ default: m.AiAgentActivityTab })),
+);
+const SophieInboxTab = lazy(() =>
+  import('@/tabs/SophieInboxTab').then((m) => ({ default: m.SophieInboxTab })),
 );
 const ChatTab = lazy(() => import('@/tabs/ChatTab').then((m) => ({ default: m.ChatTab })));
 const SmsTab = lazy(() => import('@/tabs/SmsTab').then((m) => ({ default: m.SmsTab })));
@@ -185,6 +191,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
       if (key === 'calls') return permissions.canViewCallsTab;
       if (key === 'bookings') return permissions.canViewBookingsTab;
       if (key === 'agents' || key === 'agent-performance') return permissions.canViewAgentsTab;
+      if (key === 'ai-receptionist-accounts') return permissions.canManageAgents;
       if (key === 'chat') return permissions.canViewChatTab;
       if (key === 'sms') return permissions.canViewSmsTab;
       if (key === 'agent-onboarding') return permissions.canViewAgentOnboardingTab;
@@ -192,6 +199,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
       if (key === 'clients') return permissions.canViewClientsTab;
       if (key === 'did-mappings') return permissions.canManageDIDMappings;
       if (key === 'ai-agent-activity') return permissions.canViewAuditLogs;
+      if (key === 'sophie-inbox') return permissions.canViewAuditLogs;
       if (key === 'audit-logs') return permissions.canViewAuditLogs;
       if (key === 'attendance' || key === 'leave-requests' || key === 'shift-schedule') return permissions.canViewAttendanceTab;
       if (
@@ -707,6 +715,9 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
                   tenantId={effectiveSalesTenantId}
                 />
               )}
+              {d.selectedTab === 'ai-receptionist-accounts' && permissions.canManageAgents && (
+                <AiReceptionistAccountsTab />
+              )}
               {d.selectedTab === 'agent-onboarding' && (
                 <AgentOnboardingTab
                   agentOnboarding={d.agentOnboarding}
@@ -782,6 +793,9 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
               )}
               {d.selectedTab === 'ai-agent-activity' && (
                 <AiAgentActivityTab />
+              )}
+              {d.selectedTab === 'sophie-inbox' && (
+                <SophieInboxTab />
               )}
               {d.selectedTab === 'sales-suburbs' && (
                 <SalesAgentSuburbAssignmentTab
