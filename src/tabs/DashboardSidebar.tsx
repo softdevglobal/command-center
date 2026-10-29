@@ -85,6 +85,7 @@ const NAV_ITEMS: SidebarEntry[] = [
       { key: 'agents', label: 'Directory', icon: Users },
       { key: 'agent-performance', label: 'Performance', icon: Activity },
       { key: 'ai-receptionist-accounts', label: 'AI Receptionists', icon: Bot, perm: 'canManageAgents' },
+      { key: 'sophie-text-test', label: 'Sophie Text Test', icon: MessageSquareText, perm: 'canManageAgents' },
     ],
   },
   { kind: 'item', key: 'agent-onboarding', label: 'Agent Onboarding', icon: UserPlus, perm: 'canViewAgentOnboardingTab' },

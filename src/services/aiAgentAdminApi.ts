@@ -4,21 +4,26 @@ export interface AiAgentOption {
   did: string;
   workshopName: string;
   branchName: string;
-  account: { firebaseBlackUid?: string; firebaseBlueUid?: string; name: string } | null;
+  account: { firebaseBlackUid?: string; firebaseBlueUid?: string; firebasePinkUid?: string; name: string } | null;
 }
 
 export interface AiAgentResult {
   firebaseBlackUid?: string;
   firebaseBlueUid?: string;
+  firebasePinkUid?: string;
   did: string;
   name: string;
   created: boolean;
 }
 
-const endpoint = `${API_BASE}/super-admin/ai-agents`;
+const endpoints = {
+  black: `${API_BASE}/bms-black/ai-reception`,
+  trade: `${API_BASE}/bms-blue/ai-reception`,
+  pink: `${API_BASE}/bms-pink/ai-reception`,
+} as const;
 
-async function request<T>(init?: RequestInit, brand: 'black' | 'trade' = 'black'): Promise<T> {
-  const response = await apiFetch(`${endpoint}?brand=${brand}`, {
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await apiFetch(url, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
     logoutOnUnauthorized: false,
@@ -32,11 +37,23 @@ async function request<T>(init?: RequestInit, brand: 'black' | 'trade' = 'black'
   return body as T;
 }
 
-export async function fetchAiAgentOptions(brand: 'black' | 'trade' = 'black'): Promise<AiAgentOption[]> {
-  const result = await request<{ options: AiAgentOption[] }>(undefined, brand);
+export async function fetchAiAgentOptions(brand: 'black' | 'trade' | 'pink' = 'black'): Promise<AiAgentOption[]> {
+  const result = await request<{ options: AiAgentOption[] }>(endpoints[brand]);
   return result.options;
 }
 
-export function createAiAgent(input: { did: string; name: string; brand?: 'black' | 'trade' }): Promise<AiAgentResult> {
-  return request({ method: 'POST', body: JSON.stringify(input) }, input.brand);
+export function createAiAgent(input: { did: string; name: string; brand?: 'black' | 'trade' | 'pink' }): Promise<AiAgentResult> {
+  const brand = input.brand ?? 'black';
+  return request(endpoints[brand], { method: 'POST', body: JSON.stringify({ did: input.did, name: input.name }) });
+}
+
+export interface PinkWorkshopOption {
+  ownerUid: string;
+  name: string;
+  branches: Array<{ id: string; name: string }>;
+}
+
+export async function fetchPinkWorkshopOptions(): Promise<PinkWorkshopOption[]> {
+  const result = await request<{ options: PinkWorkshopOption[] }>(`${endpoints.pink}/salons`);
+  return result.options;
 }
