@@ -10,6 +10,7 @@ import {
   type BmsWorkshopOption,
   type DIDMappingInput,
 } from '@/services/didMappingsApi';
+import { fetchPinkWorkshopOptions, type PinkWorkshopOption } from '@/services/aiAgentAdminApi';
 import { fetchTenants, fetchQueues } from '@/services/dashboardApi';
 import { apiFetch, apiUrl, getAccessToken } from '@/lib/api';
 import { EmptyState } from '@/components/dashboard/EmptyState';
@@ -72,7 +73,7 @@ const EMPTY_FORM: FormState = {
   businessName: '',
 };
 
-type MappingDialogMode = 'black' | 'blue';
+type MappingDialogMode = 'black' | 'blue' | 'pink';
 type MappingTableFilter = 'all' | MappingDialogMode;
 
 const BLUE_BUSINESSES_API_URL =
@@ -192,11 +193,13 @@ export function DIDMappingsTab({ permissions }: Props) {
   const { toast } = useToast();
   const [mappings, setMappings] = useState<DIDMapping[]>([]);
   const [workshops, setWorkshops] = useState<BmsWorkshopOption[]>([]);
+  const [pinkWorkshops, setPinkWorkshops] = useState<PinkWorkshopOption[]>([]);
   const [blueBusinesses, setBlueBusinesses] = useState<BlueBusinessOption[]>([]);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [queues, setQueues] = useState<Queue[]>([]);
   const [loading, setLoading] = useState(true);
   const [workshopsLoading, setWorkshopsLoading] = useState(false);
+  const [pinkWorkshopsLoading, setPinkWorkshopsLoading] = useState(false);
   const [blueBusinessesLoading, setBlueBusinessesLoading] = useState(false);
   const [blueBusinessesError, setBlueBusinessesError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -242,6 +245,16 @@ export function DIDMappingsTab({ permissions }: Props) {
     } finally {
       setWorkshopsLoading(false);
     }
+  }, [toast]);
+
+  const loadPinkWorkshops = useCallback(async () => {
+    setPinkWorkshopsLoading(true);
+    try {
+      const rows = await fetchPinkWorkshopOptions();
+      setPinkWorkshops(rows);
+    } catch (err) {
+      toast({ title: 'Failed to load Pink salons', description: err instanceof Error ? err.message : 'Could not reach Pink Firebase API', variant: 'destructive' });
+    } finally { setPinkWorkshopsLoading(false); }
   }, [toast]);
 
   const loadBlueBusinesses = useCallback(async () => {
@@ -300,9 +313,15 @@ export function DIDMappingsTab({ permissions }: Props) {
     [allServicesTenant?.id, queues],
   );
 
+  const defaultPinkQueue = useMemo(
+    () => findDefaultQueue(queues, 'pink', allServicesTenant?.id ?? ''),
+    [allServicesTenant?.id, queues],
+  );
+
   const getMappingKind = useCallback(
     (mapping: DIDMapping): MappingDialogMode => {
       const queue = queues.find((q) => q.id === mapping.queueId);
+      if (queue && isQueueKind(queue, 'pink')) return 'pink';
       if (queue && isQueueKind(queue, 'blue')) return 'blue';
       if (queue && isQueueKind(queue, 'black')) return 'black';
       return mapping.branchId || mapping.branchName ? 'black' : 'blue';
@@ -311,7 +330,7 @@ export function DIDMappingsTab({ permissions }: Props) {
   );
 
   const tableFilterCounts = useMemo(() => {
-    const counts = { all: mappings.length, black: 0, blue: 0 };
+    const counts = { all: mappings.length, black: 0, blue: 0, pink: 0 };
     for (const mapping of mappings) {
       counts[getMappingKind(mapping)] += 1;
     }
@@ -366,9 +385,9 @@ export function DIDMappingsTab({ permissions }: Props) {
     (mode: MappingDialogMode): FormState => ({
       ...EMPTY_FORM,
       tenantId: allServicesTenant?.id ?? '',
-      queueId: mode === 'blue' ? defaultBlueQueue?.id ?? '' : defaultBlackQueue?.id ?? '',
+      queueId: mode === 'blue' ? defaultBlueQueue?.id ?? '' : mode === 'pink' ? defaultPinkQueue?.id ?? '' : defaultBlackQueue?.id ?? '',
     }),
-    [allServicesTenant?.id, defaultBlackQueue?.id, defaultBlueQueue?.id],
+    [allServicesTenant?.id, defaultBlackQueue?.id, defaultBlueQueue?.id, defaultPinkQueue?.id],
   );
 
   useEffect(() => {
@@ -388,11 +407,12 @@ export function DIDMappingsTab({ permissions }: Props) {
     setDialogOpen(true);
     if (mode === 'black' && workshops.length === 0) void loadWorkshops();
     if (mode === 'blue' && blueBusinesses.length === 0) void loadBlueBusinesses();
+    if (mode === 'pink' && pinkWorkshops.length === 0) void loadPinkWorkshops();
   };
 
   const openEditDialog = (m: DIDMapping) => {
     const queue = queues.find((q) => q.id === m.queueId);
-    const mode: MappingDialogMode = queue && isQueueKind(queue, 'blue') ? 'blue' : 'black';
+    const mode: MappingDialogMode = queue && isQueueKind(queue, 'pink') ? 'pink' : queue && isQueueKind(queue, 'blue') ? 'blue' : 'black';
     const businessName = m.mappingWorkshopName.trim();
     const matchingBusiness = blueBusinesses.find(
       (business) => business.id === m.ownerId || business.name === businessName,
@@ -414,11 +434,12 @@ export function DIDMappingsTab({ permissions }: Props) {
     setDialogOpen(true);
     if (mode === 'black' && workshops.length === 0) void loadWorkshops();
     if (mode === 'blue' && blueBusinesses.length === 0) void loadBlueBusinesses();
+    if (mode === 'pink' && pinkWorkshops.length === 0) void loadPinkWorkshops();
   };
 
   const selectedWorkshop = useMemo(
-    () => workshops.find((w) => w.ownerUid === form.ownerUid) ?? null,
-    [workshops, form.ownerUid],
+    () => (dialogMode === 'pink' ? pinkWorkshops : workshops).find((w) => w.ownerUid === form.ownerUid) ?? null,
+    [dialogMode, pinkWorkshops, workshops, form.ownerUid],
   );
 
   const canSubmit =
@@ -474,7 +495,7 @@ export function DIDMappingsTab({ permissions }: Props) {
         description:
           dialogMode === 'blue'
             ? `${payload.did} → ${payload.workshopName} · Blue`
-            : `${payload.did} → ${payload.workshopName} · ${payload.branchName}`,
+            : `${payload.did} → ${payload.workshopName} · ${payload.branchName} · ${dialogMode === 'pink' ? 'Pink' : 'Black'}`,
       });
       setDialogOpen(false);
       await loadAll();
@@ -523,8 +544,8 @@ export function DIDMappingsTab({ permissions }: Props) {
             DID → Routing Mappings
           </h2>
           <p className="mt-1 text-sm text-slate-500">
-            Map inbound DIDs to Black workshops or Blue businesses. The Yeastar webhook
-            uses these rows to resolve tenant, queue, and screen-pop context for each call.
+            Map inbound DIDs to Black workshops, Pink salons or Blue businesses. The Yeastar webhook
+            uses these rows to resolve product, tenant, queue, and screen-pop context for each call.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -547,7 +568,7 @@ export function DIDMappingsTab({ permissions }: Props) {
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-3">
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-slate-500">
             Black DID Mappings
@@ -594,6 +615,16 @@ export function DIDMappingsTab({ permissions }: Props) {
             </Button>
           </div>
         </div>
+
+        <div className="rounded-2xl border border-pink-200 bg-pink-50/50 p-5 shadow-sm">
+          <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-pink-600">Pink DID Mappings</div>
+          <h3 className="mt-2 text-base font-semibold text-pink-950">Map DID to salon and branch</h3>
+          <p className="mt-1 text-sm text-pink-800/70">Select a Pink salon and branch. Route calls through All Services / Pink.</p>
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <div className="text-xs text-pink-700/80">Default: {allServicesTenant?.name ?? 'All Services'} / {defaultPinkQueue?.name ?? 'Pink queue'}</div>
+            <Button onClick={() => openCreateDialog('pink')} className="gap-2 bg-pink-600 text-white hover:bg-pink-700"><Plus className="h-4 w-4" />Add Pink DID</Button>
+          </div>
+        </div>
       </div>
 
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -601,14 +632,14 @@ export function DIDMappingsTab({ permissions }: Props) {
           <div>
             <h3 className="text-sm font-semibold text-slate-900">DID mapping table</h3>
             <p className="text-xs text-slate-500">
-              Filter rows by Black or Blue routing queue.
+              Filter rows by Black, Blue or Pink routing queue.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {(['all', 'black', 'blue'] as const).map((filter) => {
+            {(['all', 'black', 'blue', 'pink'] as const).map((filter) => {
               const active = tableFilter === filter;
               const label =
-                filter === 'all' ? 'All' : filter === 'black' ? 'Black' : 'Blue';
+                filter === 'all' ? 'All' : filter === 'black' ? 'Black' : filter === 'blue' ? 'Blue' : 'Pink';
               return (
                 <Button
                   key={filter}
@@ -617,8 +648,8 @@ export function DIDMappingsTab({ permissions }: Props) {
                   variant={active ? 'default' : 'outline'}
                   onClick={() => setTableFilter(filter)}
                   className={
-                    filter === 'blue' && active
-                      ? 'bg-blue-600 text-white hover:bg-blue-700'
+                    (filter === 'blue' || filter === 'pink') && active
+                      ? filter === 'pink' ? 'bg-pink-600 text-white hover:bg-pink-700' : 'bg-blue-600 text-white hover:bg-blue-700'
                       : undefined
                   }
                 >
@@ -651,13 +682,13 @@ export function DIDMappingsTab({ permissions }: Props) {
             ) : mappings.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="py-10 text-center text-slate-500">
-                  No DID mappings yet. Use the Black or Blue section above to add one.
+                  No DID mappings yet. Use the product section above to add one.
                 </TableCell>
               </TableRow>
             ) : filteredMappings.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={7} className="py-10 text-center text-slate-500">
-                  No {tableFilter === 'blue' ? 'Blue' : 'Black'} DID mappings found.
+                  No {tableFilter === 'blue' ? 'Blue' : tableFilter === 'pink' ? 'Pink' : 'Black'} DID mappings found.
                 </TableCell>
               </TableRow>
             ) : (
@@ -735,13 +766,13 @@ export function DIDMappingsTab({ permissions }: Props) {
           <DialogHeader>
             <DialogTitle>
               {editingDid
-                ? `Edit ${dialogMode === 'blue' ? 'Blue' : 'Black'} DID Mapping`
-                : `New ${dialogMode === 'blue' ? 'Blue' : 'Black'} DID Mapping`}
+                ? `Edit ${dialogMode === 'blue' ? 'Blue' : dialogMode === 'pink' ? 'Pink' : 'Black'} DID Mapping`
+                : `New ${dialogMode === 'blue' ? 'Blue' : dialogMode === 'pink' ? 'Pink' : 'Black'} DID Mapping`}
             </DialogTitle>
             <DialogDescription>
               {dialogMode === 'blue'
                 ? 'Add a Blue DID with a business name. Routing defaults to All Services and the Blue queue.'
-                : 'Map an inbound DID to a BMS workshop branch, then link it to a local tenant and queue for routing.'}
+                : `Map an inbound DID to a BMS ${dialogMode === 'pink' ? 'salon' : 'workshop'} branch. Product routing uses the ${dialogMode === 'pink' ? 'Pink' : 'Black'} queue.`}
             </DialogDescription>
           </DialogHeader>
 
@@ -837,30 +868,30 @@ export function DIDMappingsTab({ permissions }: Props) {
             ) : (
               <>
                 <div className="grid gap-2">
-                  <Label>Workshop (Firebase)</Label>
+                  <Label>{dialogMode === 'pink' ? 'Salon (Pink Firebase)' : 'Workshop (Black Firebase)'}</Label>
                   <Select
                     value={form.ownerUid}
                     onValueChange={(v) =>
                       setForm((p) => ({ ...p, ownerUid: v, branchId: '' }))
                     }
-                    disabled={workshopsLoading}
+                    disabled={dialogMode === 'pink' ? pinkWorkshopsLoading : workshopsLoading}
                   >
                     <SelectTrigger>
                       <SelectValue
                         placeholder={
-                          workshopsLoading ? 'Loading workshops…' : 'Select a workshop'
+                          (dialogMode === 'pink' ? pinkWorkshopsLoading : workshopsLoading) ? 'Loading salons…' : `Select a ${dialogMode === 'pink' ? 'salon' : 'workshop'}`
                         }
                       />
                     </SelectTrigger>
                     <SelectContent>
-                      {workshops.map((w) => (
+                      {(dialogMode === 'pink' ? pinkWorkshops : workshops).map((w) => (
                         <SelectItem key={w.ownerUid} value={w.ownerUid}>
                           {w.name}
                         </SelectItem>
                       ))}
-                      {!workshopsLoading && workshops.length === 0 && (
+                      {!(dialogMode === 'pink' ? pinkWorkshopsLoading : workshopsLoading) && (dialogMode === 'pink' ? pinkWorkshops : workshops).length === 0 && (
                         <div className="px-3 py-2 text-xs text-slate-500">
-                          No workshops available
+                          No {dialogMode === 'pink' ? 'salons' : 'workshops'} available
                         </div>
                       )}
                     </SelectContent>
@@ -912,15 +943,14 @@ export function DIDMappingsTab({ permissions }: Props) {
                     <Input
                       value={
                         queues.find((q) => q.id === form.queueId)?.name ??
-                        defaultBlackQueue?.name ??
-                        'Black'
+                        (dialogMode === 'pink' ? defaultPinkQueue?.name ?? 'Pink' : defaultBlackQueue?.name ?? 'Black')
                       }
                       readOnly
                     />
                   </div>
                   {(!form.tenantId || !form.queueId) && (
                     <p className="sm:col-span-2 text-xs text-rose-600">
-                      All Services tenant or Black queue was not found. Create them before saving this mapping.
+                      All Services tenant or {dialogMode === 'pink' ? 'Pink' : 'Black'} queue was not found. Create them before saving this mapping.
                     </p>
                   )}
                 </div>

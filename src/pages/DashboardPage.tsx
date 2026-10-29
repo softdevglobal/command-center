@@ -34,6 +34,9 @@ const AgentPerformanceTab = lazy(() =>
 const AiReceptionistAccountsTab = lazy(() =>
   import('@/tabs/AiReceptionistAccountsTab').then((m) => ({ default: m.AiReceptionistAccountsTab })),
 );
+const SophieTextTestTab = lazy(() =>
+  import('@/tabs/SophieTextTestTab').then((m) => ({ default: m.SophieTextTestTab })),
+);
 const CallsTab = lazy(() => import('@/tabs/CallsTab').then((m) => ({ default: m.CallsTab })));
 const SipLinesTab = lazy(() =>
   import('@/tabs/SipLinesTab').then((m) => ({ default: m.SipLinesTab })),
@@ -192,6 +195,7 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
       if (key === 'bookings') return permissions.canViewBookingsTab;
       if (key === 'agents' || key === 'agent-performance') return permissions.canViewAgentsTab;
       if (key === 'ai-receptionist-accounts') return permissions.canManageAgents;
+      if (key === 'sophie-text-test') return permissions.canManageAgents;
       if (key === 'chat') return permissions.canViewChatTab;
       if (key === 'sms') return permissions.canViewSmsTab;
       if (key === 'agent-onboarding') return permissions.canViewAgentOnboardingTab;
@@ -717,6 +721,9 @@ export default function DashboardPage({ session, permissions, onSignOut }: Dashb
               )}
               {d.selectedTab === 'ai-receptionist-accounts' && permissions.canManageAgents && (
                 <AiReceptionistAccountsTab />
+              )}
+              {d.selectedTab === 'sophie-text-test' && permissions.canManageAgents && (
+                <SophieTextTestTab />
               )}
               {d.selectedTab === 'agent-onboarding' && (
                 <AgentOnboardingTab

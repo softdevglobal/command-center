@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { AiAgentAccountsModal } from '@/components/dashboard/AiAgentAccountsModal';
 import { fetchAiAgentOptions, type AiAgentOption } from '@/services/aiAgentAdminApi';
 
-type Brand = 'black' | 'trade';
+type Brand = 'black' | 'trade' | 'pink';
 
 export function AiReceptionistAccountsTab() {
   const [brand, setBrand] = useState<Brand>('trade');
@@ -37,7 +37,7 @@ export function AiReceptionistAccountsTab() {
     return () => { cancelled = true; };
   }, [load, refresh]);
 
-  const brandName = brand === 'trade' ? 'BMS Trade' : 'BMS Black';
+  const brandName = brand === 'trade' ? 'BMS Trade' : brand === 'pink' ? 'BMS Pink' : 'BMS Black';
 
   return (
     <div className="cc-fade-in space-y-6">
@@ -45,7 +45,7 @@ export function AiReceptionistAccountsTab() {
         <div>
           <p className="mb-1 font-mono text-[11px] uppercase tracking-[0.22em] text-muted-foreground">Agents &amp; Performance</p>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">AI Receptionists</h1>
-          <p className="mt-1 text-sm text-muted-foreground">View mapped business numbers and manage their Black or Trade receptionist accounts.</p>
+          <p className="mt-1 text-sm text-muted-foreground">View mapped business numbers and manage their Black, Trade or Pink receptionist accounts.</p>
         </div>
         <div className="flex gap-2">
           <Button type="button" variant="outline" onClick={() => setRefresh((value) => value + 1)} disabled={loading}>
@@ -58,10 +58,10 @@ export function AiReceptionistAccountsTab() {
       </div>
 
       <div className="flex gap-2" role="tablist" aria-label="AI receptionist product">
-        {(['trade', 'black'] as const).map((item) => (
+        {(['trade', 'black', 'pink'] as const).map((item) => (
           <Button key={item} type="button" size="sm" variant={brand === item ? 'default' : 'outline'}
             role="tab" aria-selected={brand === item} onClick={() => setBrand(item)}>
-            {item === 'trade' ? 'BMS Trade' : 'BMS Black'}
+            {item === 'trade' ? 'BMS Trade' : item === 'pink' ? 'BMS Pink' : 'BMS Black'}
           </Button>
         ))}
       </div>

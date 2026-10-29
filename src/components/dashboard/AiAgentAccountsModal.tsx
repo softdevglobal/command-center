@@ -7,9 +7,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { createAiAgent, fetchAiAgentOptions, type AiAgentOption, type AiAgentResult } from '@/services/aiAgentAdminApi';
 
-export function AiAgentAccountsModal({ open, onClose, initialBrand = 'black' }: { open: boolean; onClose: () => void; initialBrand?: 'black' | 'trade' }) {
+type Brand = 'black' | 'trade' | 'pink';
+
+export function AiAgentAccountsModal({ open, onClose, initialBrand = 'black' }: { open: boolean; onClose: () => void; initialBrand?: Brand }) {
   const [options, setOptions] = useState<AiAgentOption[]>([]);
-  const [brand, setBrand] = useState<'black' | 'trade'>(initialBrand);
+  const [brand, setBrand] = useState<Brand>(initialBrand);
   const [did, setDid] = useState('');
   const [name, setName] = useState('AI Receptionist');
   const [loading, setLoading] = useState(false);
@@ -19,7 +21,7 @@ export function AiAgentAccountsModal({ open, onClose, initialBrand = 'black' }: 
   const [result, setResult] = useState<AiAgentResult | null>(null);
   const [reload, setReload] = useState(0);
   const selected = options.find((item) => item.did === did);
-  const uid = result?.firebaseBlackUid || result?.firebaseBlueUid || selected?.account?.firebaseBlackUid || selected?.account?.firebaseBlueUid;
+  const uid = result?.firebaseBlackUid || result?.firebaseBlueUid || result?.firebasePinkUid || selected?.account?.firebaseBlackUid || selected?.account?.firebaseBlueUid || selected?.account?.firebasePinkUid;
 
   useEffect(() => {
     if (open) setBrand(initialBrand);
@@ -50,7 +52,7 @@ export function AiAgentAccountsModal({ open, onClose, initialBrand = 'black' }: 
       const account = await createAiAgent({ did, name: name.trim(), brand });
       setResult(account);
       setOptions((items) => items.map((item) => item.did === account.did
-        ? { ...item, account: { firebaseBlackUid: account.firebaseBlackUid, firebaseBlueUid: account.firebaseBlueUid, name: account.name } }
+        ? { ...item, account: { firebaseBlackUid: account.firebaseBlackUid, firebaseBlueUid: account.firebaseBlueUid, firebasePinkUid: account.firebasePinkUid, name: account.name } }
         : item));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create the AI account.');
@@ -68,22 +70,22 @@ export function AiAgentAccountsModal({ open, onClose, initialBrand = 'black' }: 
       <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto bg-white" onInteractOutside={(event) => { if (saving) event.preventDefault(); }} onEscapeKeyDown={(event) => { if (saving) event.preventDefault(); }}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Bot className="h-5 w-5" />AI Receptionist Accounts</DialogTitle>
-          <DialogDescription>Create a Black or Trade receptionist account for a mapped business phone number.</DialogDescription>
+          <DialogDescription>Create a Black, Trade or Pink receptionist account for a mapped business phone number.</DialogDescription>
         </DialogHeader>
         <p className="rounded-lg bg-slate-50 p-3 text-sm text-slate-600">
-          Choose a mapped phone number to assign the account to its business. Black accounts also use the mapped branch. The account needs no login password.
+          Choose a mapped phone number to assign the account to its business. Black and Pink accounts also use the mapped branch. The account needs no login password.
         </p>
         <div className="space-y-2">
           <Label htmlFor="ai-agent-brand">Product</Label>
-          <Select value={brand} disabled={saving} onValueChange={(value: 'black' | 'trade') => { setBrand(value); setDid(''); setResult(null); setOptions([]); }}>
+          <Select value={brand} disabled={saving} onValueChange={(value: Brand) => { setBrand(value); setDid(''); setResult(null); setOptions([]); }}>
             <SelectTrigger id="ai-agent-brand"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="black">BMS Black</SelectItem><SelectItem value="trade">BMS Trade</SelectItem></SelectContent>
+            <SelectContent><SelectItem value="black">BMS Black</SelectItem><SelectItem value="trade">BMS Trade</SelectItem><SelectItem value="pink">BMS Pink</SelectItem></SelectContent>
           </Select>
         </div>
         {error && <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
         {loading ? <p role="status" className="text-sm text-muted-foreground">Loading business phone numbers…</p> : (
           <>
-            {options.length === 0 && !error && <p className="text-sm text-muted-foreground">No mapped phone numbers found. Add a {brand === 'trade' ? 'Trade business mapping with a Blue queue' : 'Black workshop and branch mapping'} on the DID Mappings page first.</p>}
+            {options.length === 0 && !error && <p className="text-sm text-muted-foreground">No mapped phone numbers found. Add a {brand === 'trade' ? 'Trade business mapping with a Blue queue' : brand === 'pink' ? 'Pink salon and branch mapping with a Pink queue' : 'Black workshop and branch mapping'} on the DID Mappings page first.</p>}
             {options.length > 0 && <>
               <div className="space-y-2">
                 <Label htmlFor="ai-agent-did">Business phone number</Label>
@@ -95,7 +97,7 @@ export function AiAgentAccountsModal({ open, onClose, initialBrand = 'black' }: 
                   <SelectContent>{options.map((item) => <SelectItem key={item.did} value={item.did}>{[item.workshopName, item.branchName, item.did].filter(Boolean).join(' · ')}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
-              {selected && <p className="text-sm text-muted-foreground">Assigned to {[selected.workshopName, selected.branchName].filter(Boolean).join(', ')}. Product: BMS {brand === 'trade' ? 'Trade' : 'Black'}.</p>}
+              {selected && <p className="text-sm text-muted-foreground">Assigned to {[selected.workshopName, selected.branchName].filter(Boolean).join(', ')}. Product: BMS {brand === 'trade' ? 'Trade' : brand === 'pink' ? 'Pink' : 'Black'}.</p>}
               <div className="space-y-2">
                 <Label htmlFor="ai-agent-name">Account name</Label>
                 <Input id="ai-agent-name" value={name} maxLength={120} disabled={saving || !!selected?.account} onChange={(event) => setName(event.target.value)} />
